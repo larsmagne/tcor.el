@@ -44,12 +44,21 @@
 					  "convert" t (current-buffer) nil
 					  "-morphology" "close" "diamond"
 					  "-" "png:-")
+					 ;; ocr.space has a 5MB image limit.
+					 (when (> (buffer-size) 4500000)
+					   (call-process-region
+					    (point-min) (point-max)
+					    "convert" t (current-buffer) nil
+					    "-" "jpg:-"))
 					 (buffer-string)))
 			("name" . "file")
 			("filename" . ,(file-name-nondirectory file)))))
 	   boundary)))
-    (with-current-buffer (url-retrieve-synchronously
-			  "https://apipro2.ocr.space/parse/image" t)
+    (with-current-buffer (or (ignore-errors
+			       (url-retrieve-synchronously
+				"https://apipro2.ocr.space/parse/image" t nil
+				600))
+			     (generate-new-buffer "*error*"))
       (goto-char (point-min))
       (prog1
 	  (when (re-search-forward "\n\n" nil t)
@@ -62,11 +71,13 @@
 	(coding-system-for-write 'utf-8)
 	json)
     (with-temp-buffer
-      (insert data)
-      (write-region (point-min) (point-max)
-		    (replace-regexp-in-string "[.][^.]+\\'" ".json" file))
+      (insert (or data ""))
       (goto-char (point-min))
-      (setq json (json-read)))
+      (setq json (ignore-errors
+		   (json-read)))
+      (when json
+	(write-region (point-min) (point-max)
+		      (replace-regexp-in-string "[.][^.]+\\'" ".json" file))))
     (let ((ocr (cdr (assq 'ParsedResults json))))
       (when ocr
 	(with-temp-buffer
@@ -84,5 +95,7 @@
 	    (write-region (point-min) (point-max)
 			  (replace-regexp-in-string
 			   "[.][^.]+\\'" ".txt" file))))))))
+
+(provide 'tcor)
 
 ;;; tcor.el ends here
