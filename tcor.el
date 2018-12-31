@@ -26,7 +26,7 @@
 
 (defvar tcor-api-key nil)
 
-(defun tcor-upload (file)
+(defun tcor-upload (file &optional no-process)
   (let* ((url-request-method "POST")
 	 (boundary "--14--")
 	 (url-request-extra-headers
@@ -36,16 +36,15 @@
 	  (mm-url-encode-multipart-form-data
 	   `(("apikey" . ,tcor-api-key)
 	     ("isOverlayRequired" . "true")
-	     ("detectOrientation" . "true")
-	     ("scale" . "true")
 	     ("file" . (("filedata" . ,(with-temp-buffer
 					 (set-buffer-multibyte nil)
 					 (insert-file-contents file)
-					 (call-process-region
-					  (point-min) (point-max)
-					  "convert" t (current-buffer) nil
-					  "-morphology" "close" "diamond"
-					  "-" "png:-")
+					 (unless no-process
+					   (call-process-region
+					    (point-min) (point-max)
+					    "convert" t (current-buffer) nil
+					    "-morphology" "close" "diamond"
+					    "-" "png:-"))
 					 ;; ocr.space has a 5MB image limit.
 					 (when (> (buffer-size) 4500000)
 					   (call-process-region
@@ -67,9 +66,9 @@
 	    (buffer-substring (point) (point-max)))
 	(kill-buffer (current-buffer))))))
 
-(defun tcor-ocr (file)
+(defun tcor-ocr (file &optional no-process)
   (message "OCR-ing %s" file)
-  (let ((data (tcor-upload file))
+  (let ((data (tcor-upload file no-process))
 	(coding-system-for-write 'utf-8)
 	json)
     (with-temp-buffer
@@ -97,6 +96,12 @@
 	    (write-region (point-min) (point-max)
 			  (replace-regexp-in-string
 			   "[.][^.]+\\'" ".txt" file))))))))
+
+(defun tcor-all ()
+  (dolist (file (directory-files-recursively "~/tcj/TCJ/" "page.*jpg"))
+    (unless (file-exists-p
+	     (replace-regexp-in-string "[.][^.]+\\'" ".json" file))
+      (tcor-ocr file t))))
 
 (provide 'tcor)
 
