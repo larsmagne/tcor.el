@@ -36,6 +36,8 @@
 	  (mm-url-encode-multipart-form-data
 	   `(("apikey" . ,tcor-api-key)
 	     ("isOverlayRequired" . "true")
+	     ("scale" . "true")
+	     ;;("OCREngine" . "2")
 	     ("file" . (("filedata" . ,(with-temp-buffer
 					 (set-buffer-multibyte nil)
 					 (insert-file-contents file)
@@ -98,10 +100,11 @@
 			   "[.][^.]+\\'" ".txt" file))))))))
 
 (defun tcor-all ()
-  (dolist (file (directory-files-recursively "~/tcj/TCJ/" "page.*jpg"))
+  (dolist (file (directory-files-recursively "~/src/kwakk/magscan/AH"
+					     "page.*jpg$"))
     (unless (file-exists-p
 	     (replace-regexp-in-string "[.][^.]+\\'" ".json" file))
-      (tcor-ocr file t))))
+      (tcor-ocr file (string-match-p "AH" file)))))
 
 (provide 'tcor)
 
