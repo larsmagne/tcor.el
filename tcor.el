@@ -78,11 +78,14 @@
       (goto-char (point-min))
       (setq json (ignore-errors
 		   (json-read)))
-      (when json
+      (when (and json
+		 (eq (cdr (assq 'IsErroredOnProcessing json))
+		     :json-false))
 	(write-region (point-min) (point-max)
 		      (replace-regexp-in-string "[.][^.]+\\'" ".json" file))))
     (let ((ocr (cdr (assq 'ParsedResults json))))
-      (when ocr
+      (when (and ocr
+		 (plusp (length ocr)))
 	(with-temp-buffer
 	  (let ((text (cdr (assq 'ParsedText (aref ocr 0)))))
 	    (insert text)
@@ -100,11 +103,151 @@
 			   "[.][^.]+\\'" ".txt" file))))))))
 
 (defun tcor-all ()
-  (dolist (file (directory-files-recursively "~/src/kwakk/magscan/AH"
-					     "page.*jpg$"))
+  (dolist (file (directory-files-recursively
+		 "~/src/kwakk/magscan"
+		 "page.*jpg$"))
     (unless (file-exists-p
 	     (replace-regexp-in-string "[.][^.]+\\'" ".json" file))
-      (tcor-ocr file (string-match-p "AH" file)))))
+      (tcor-ocr file t))))
+
+(defun tcor-unpack-cbr (dir mag)
+  (dolist (cbr (directory-files dir t "[.]cb[zr]$"))
+    (when (string-match "\\b[0-9][0-9][0-9]\\b" cbr)
+      (message "%s" cbr)
+      (let* ((issue (match-string 0 cbr))
+	     (sub (expand-file-name issue
+				    (format "~/src/kwakk/magscan/%s/" mag))))
+	(unless (file-exists-p sub)
+	  (make-directory sub t)
+	  (let ((default-directory sub))
+	    (if (string-match "[.]cbr$" cbr)
+		(call-process "unrar" nil nil nil "e" cbr)
+	      (call-process "unzip" nil nil nil "-j" cbr))
+	    ;; Delete Macos resource files.
+	    (dolist (file (directory-files sub t "\\`[.]_"))
+	      (delete-file file))
+	    (cl-loop
+	     with i = 0
+	     for file in (directory-files sub t "[.][jJ][pP][eE]?[gG]$")
+	     for size = (magscan-image-size file)
+	     do (if (< (car size) (cdr size))
+		    ;; Vertical
+		    (rename-file file
+				 (expand-file-name (format "page-%03d.jpg"
+							   (cl-incf i))
+						   sub))
+		  ;; Horizontal.
+		  (call-process
+		   "convert" nil nil nil
+		   "-crop" (format "%sx%s+0+0" (/ (car size) 2) (cdr size))
+		   (file-truename file)
+		   (expand-file-name (format "page-%03d.jpg" (cl-incf i))
+				     sub))
+		  (call-process
+		   "convert" nil nil nil
+		   "-crop" (format "%sx%s+%s-0"
+				   (/ (car size) 2)
+				   (cdr size)
+				   (/ (car size) 2))
+		   ;; "1949x3064+1949-0"
+		   (file-truename file)
+		   (expand-file-name (format "page-%03d.jpg" (cl-incf i))
+				     sub))
+		  (delete-file file)))))))))
+
+(defun tcor-unpack-cbr-unnumered (dir)
+  (cl-loop for cbr in (directory-files dir t "[.]cb[zr]$")
+	   for issue from 1
+	   do
+	   (progn
+	     (message "%s" cbr)
+	     (let* ((sub (expand-file-name (format "WS%03d" issue)
+					   "~/src/kwakk/magscan/W/")))
+	       (unless (file-exists-p sub)
+		 (make-directory sub)
+		 (let ((default-directory sub))
+		   (if (string-match "[.]cbr$" cbr)
+		       (call-process "unrar" nil nil nil "e" cbr)
+		     (call-process "unzip" nil nil nil "-j" cbr))
+		   (cl-loop for page from 1
+			    for file in (directory-files
+					 sub t "[.][jJ][pP][eE]?[gG]$")
+			    do (rename-file file
+					    (expand-file-name
+					     (format "page-%03d.jpg" page)
+					     sub)))))))))
+
+(defun tcor-find-archive-org-urls (search-url)
+  (interactive "sURL: ")
+  (pop-to-buffer "*archive*")
+  (erase-buffer)
+  (let ((data
+	 (with-current-buffer (url-retrieve-synchronously search-url)
+	   (goto-char (point-min))
+	   (search-forward "\n\n")
+	   (prog1
+	       (json-parse-buffer)
+	     (kill-buffer (current-buffer))))))
+    (setq urls
+	  (cl-loop for hit across
+		   (gethash "hits"
+			    (gethash "hits"
+				     (gethash "body"
+					      (gethash "response" data))))
+		   collect
+		   (cons (gethash "identifier" (gethash "fields" hit))
+			 (gethash "title" (gethash "fields" hit)))))))
+
+(defun tcor-unpack-jp2 (dir mag)
+  (dolist (zip (directory-files dir t "[.]zip$"))
+    (when (string-match "\\b[0-9][0-9][0-9]\\b" zip)
+      (message "%s" zip)
+      (let* ((issue (match-string 0 zip))
+	     (sub (expand-file-name issue
+				    (format "~/src/kwakk/magscan/%s/" mag))))
+	(unless (file-exists-p sub)
+	  (make-directory sub t)
+	  (let ((default-directory sub))
+	    (call-process "unzip" nil nil nil "-j" zip)
+	    ;; Delete Macos resource files.
+	    (dolist (file (directory-files sub t "\\`[.]_"))
+	      (delete-file file))
+	    (cl-loop
+	     with i = 0
+	     for jp-file in (directory-files sub t "[.][jJ][pP]2$")
+	     for file = (file-name-with-extension jp-file ".jpg")
+	     do (call-process "convert" nil nil nil jp-file file)
+	     for size = (magscan-image-size file)
+	     do (when (> (car size) 3000)
+		  (call-process "gm" nil nil nil
+				"mogrify" "-resize" "3000x"
+				file)
+		  (setq size (magscan-image-size file)))
+	     do (if (< (car size) (cdr size))
+		    ;; Vertical
+		    (rename-file file
+				 (expand-file-name (format "page-%03d.jpg"
+							   (cl-incf i))
+						   sub))
+		  ;; Horizontal.
+		  (call-process
+		   "convert" nil nil nil
+		   "-crop" (format "%sx%s+0+0" (/ (car size) 2) (cdr size))
+		   (file-truename file)
+		   (expand-file-name (format "page-%03d.jpg" (cl-incf i))
+				     sub))
+		  (call-process
+		   "convert" nil nil nil
+		   "-crop" (format "%sx%s+%s-0"
+				   (/ (car size) 2)
+				   (cdr size)
+				   (/ (car size) 2))
+		   ;; "1949x3064+1949-0"
+		   (file-truename file)
+		   (expand-file-name (format "page-%03d.jpg" (cl-incf i))
+				     sub))
+		  (delete-file file))
+	     (delete-file jp-file))))))))
 
 (provide 'tcor)
 
