@@ -78,6 +78,10 @@
       (goto-char (point-min))
       (setq json (ignore-errors
 		   (json-read)))
+      (when (eq (cdr (assq 'IsErroredOnProcessing json))
+		t)
+	(message "%s" (cdr (assq 'ErrorMessage json)))
+	(sit-for 2))
       (when (and json
 		 (eq (cdr (assq 'IsErroredOnProcessing json))
 		     :json-false))
@@ -104,11 +108,12 @@
 
 (defun tcor-all ()
   (dolist (file (directory-files-recursively
-		 "~/src/kwakk/magscan"
+		 "~/src/kwakk/magscan/"
 		 "page.*jpg$"))
     (unless (file-exists-p
 	     (replace-regexp-in-string "[.][^.]+\\'" ".json" file))
-      (tcor-ocr file t))))
+      (tcor-ocr file t)))
+  (magscan-covers-and-count))
 
 (defun tcor-unpack-cbr (dir mag)
   (dolist (cbr (directory-files dir t "[.]cb[zr]$"))
@@ -122,7 +127,8 @@
 	  (let ((default-directory sub))
 	    (if (string-match "[.]cbr$" cbr)
 		(call-process "unrar" nil nil nil "e" cbr)
-	      (call-process "unzip" nil nil nil "-j" cbr))
+	      (unless (zerop (call-process "unzip" nil nil nil "-j" cbr))
+		(call-process "7z" nil nil nil "e" cbr)))
 	    ;; Delete Macos resource files.
 	    (dolist (file (directory-files sub t "\\`[.]_"))
 	      (delete-file file))
@@ -200,7 +206,7 @@
 
 (defun tcor-unpack-jp2 (dir mag)
   (dolist (zip (directory-files dir t "[.]zip$"))
-    (when (string-match "\\b[0-9][0-9][0-9]\\b" zip)
+    (when (string-match "\\b[0-9][0-9][0-9][0-9]\\b" zip)
       (message "%s" zip)
       (let* ((issue (match-string 0 zip))
 	     (sub (expand-file-name issue
@@ -248,6 +254,57 @@
 				     sub))
 		  (delete-file file))
 	     (delete-file jp-file))))))))
+
+(defun tcor-unpack-pdf (dir mag &optional inhibit-split)
+  (dolist (pdf (directory-files dir t "[.]pdf$"))
+    (when (string-match "\\b[0-9][0-9][0-9]\\b" pdf)
+      (let* ((issue (match-string 0 pdf))
+	     (sub (expand-file-name issue
+				    (format "~/src/kwakk/magscan/%s/" mag))))
+	(message "%s" pdf)
+	(unless (file-exists-p sub)
+	  (make-directory sub t)
+	  (let ((default-directory sub))
+	    (call-process "pdftoppm" nil nil nil
+			  "-jpeg"
+			  "-rx" "250"
+			  "-ry" "250"
+			  pdf
+			  "PDF")
+	    (cl-loop
+	     with i = 0
+	     for file in (directory-files sub t "[.]jpg$")
+	     for size = (progn
+			  (when nil
+			    (call-process "mogrify" nil nil nil
+					  "-rotate" "270"
+					  file))
+			  (magscan-image-size file))
+	     do (if (or inhibit-split
+			(< (car size) (cdr size)))
+		    ;; Vertical
+		    (rename-file file
+				 (expand-file-name (format "page-%03d.jpg"
+							   (cl-incf i))
+						   sub))
+		  ;; Horizontal.
+		  (call-process
+		   "convert" nil nil nil
+		   "-crop" (format "%sx%s+0+0" (/ (car size) 2) (cdr size))
+		   (file-truename file)
+		   (expand-file-name (format "page-%03d.jpg" (cl-incf i))
+				     sub))
+		  (call-process
+		   "convert" nil nil nil
+		   "-crop" (format "%sx%s+%s-0"
+				   (/ (car size) 2)
+				   (cdr size)
+				   (/ (car size) 2))
+		   ;; "1949x3064+1949-0"
+		   (file-truename file)
+		   (expand-file-name (format "page-%03d.jpg" (cl-incf i))
+				     sub))
+		  (delete-file file)))))))))
 
 (provide 'tcor)
 
