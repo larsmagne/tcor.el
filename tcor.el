@@ -59,7 +59,7 @@
 	   boundary)))
     (with-current-buffer (or (ignore-errors
 			       (url-retrieve-synchronously
-				"https://apipro2.ocr.space/parse/image" t nil
+				"https://apipro1.ocr.space/parse/image" t nil
 				600))
 			     (generate-new-buffer "*error*"))
       (goto-char (point-min))
@@ -80,8 +80,10 @@
 		   (json-read)))
       (when (eq (cdr (assq 'IsErroredOnProcessing json))
 		t)
-	(message "%s" (cdr (assq 'ErrorMessage json)))
-	(sit-for 2))
+	(message "%s: %s" (cdr (assq 'ErrorMessage json))
+		 (cdr (assq 'ErrorMessage
+			    (elt (cdr (assq 'ParsedResults json)) 0))))
+	(sleep-for 2))
       (when (and json
 		 (eq (cdr (assq 'IsErroredOnProcessing json))
 		     :json-false))
@@ -106,7 +108,18 @@
 			  (replace-regexp-in-string
 			   "[.][^.]+\\'" ".txt" file))))))))
 
+(defun tcor-resize-images ()
+  (dolist (file (directory-files-recursively
+		 "~/src/kwakk/magscan/TCR/" "page.*jpg$"))
+    (when (and (not (file-exists-p (file-name-with-extension file "json")))
+	       (> (car (magscan-image-size file))
+		  3000))
+      (message "Resizing %s" file)
+      (call-process "mogrify" nil nil nil "-resize" "3000x"
+		    (expand-file-name (file-name-with-extension file "jpg"))))))
+
 (defun tcor-all ()
+  ;;(tcor-resize-images)
   (dolist (file (directory-files-recursively
 		 "~/src/kwakk/magscan/"
 		 "page.*jpg$"))
@@ -115,18 +128,25 @@
       (tcor-ocr file t)))
   (magscan-covers-and-count))
 
+(defun tcor-sort-by-size (files)
+  (nreverse
+   (sort files (lambda (f1 f2)
+		 (< (file-attribute-size (file-attributes f1))
+		    (file-attribute-size (file-attributes f2)))))))
+
 (defun tcor-unpack-cbr (dir mag)
-  (dolist (cbr (directory-files dir t "[.]cb[zr]$"))
+  (dolist (cbr (tcor-sort-by-size (directory-files dir t "[.]cb[zr]$")))
     (when (string-match "\\b[0-9][0-9][0-9]\\b" cbr)
       (message "%s" cbr)
       (let* ((issue (match-string 0 cbr))
-	     (sub (expand-file-name issue
+	     (sub (expand-file-name (concat "" issue)
 				    (format "~/src/kwakk/magscan/%s/" mag))))
 	(unless (file-exists-p sub)
 	  (make-directory sub t)
 	  (let ((default-directory sub))
 	    (if (string-match "[.]cbr$" cbr)
-		(call-process "unrar" nil nil nil "e" cbr)
+		(with-environment-variables (("LANG" "C.UTF-8"))
+		  (call-process "unrar" nil nil nil "e" cbr))
 	      (unless (zerop (call-process "unzip" nil nil nil "-j" cbr))
 		(call-process "7z" nil nil nil "e" cbr)))
 	    ;; Delete Macos resource files.
@@ -194,15 +214,14 @@
 	   (prog1
 	       (json-parse-buffer)
 	     (kill-buffer (current-buffer))))))
-    (setq urls
-	  (cl-loop for hit across
-		   (gethash "hits"
-			    (gethash "hits"
-				     (gethash "body"
-					      (gethash "response" data))))
-		   collect
-		   (cons (gethash "identifier" (gethash "fields" hit))
-			 (gethash "title" (gethash "fields" hit)))))))
+    (cl-loop for hit across
+	     (gethash "hits"
+		      (gethash "hits"
+			       (gethash "body"
+					(gethash "response" data))))
+	     collect
+	     (cons (gethash "identifier" (gethash "fields" hit))
+		   (gethash "title" (gethash "fields" hit))))))
 
 (defun tcor-unpack-jp2 (dir mag)
   (dolist (zip (directory-files dir t "[.]zip$"))
@@ -305,6 +324,56 @@
 		   (expand-file-name (format "page-%03d.jpg" (cl-incf i))
 				     sub))
 		  (delete-file file)))))))))
+
+(defun tcor-import-directories (dir mag)
+  (dolist (dir (directory-files dir t "[0-9]"))
+    (when (string-match "\\b[0-9][0-9][0-9]\\b" dir)
+      (let* ((issue (match-string 0 dir))
+	     (sub (expand-file-name issue
+				    (format "~/src/kwakk/magscan/%s/" mag)))
+	     (i 0))
+	(message "%s" dir)
+	(unless (file-exists-p sub)
+	  (make-directory sub t)
+	  (dolist (file (directory-files dir t "webp\\|jpeg\\'"))
+	    (call-process
+	     "convert" nil nil nil
+	     (file-truename file)
+	     (expand-file-name (format "page-%03d.jpg" (cl-incf i)) sub))))))))
+
+(defun tcor-list-missing-issues (mag)
+  (let* ((data (with-temp-buffer
+		 (insert-file-contents "~/src/kwakk/magazines.json")
+		 (json-read)))
+	 (elem (cdr (assq (intern mag) data))))
+    (unless elem
+      (user-error "No such mag: %s" mag))
+    (let ((name (elt elem 0)))
+      (pop-to-buffer "*missing*")
+      (erase-buffer)
+      (let* ((issues (directory-files (format "~/src/kwakk/magscan/%s/" mag) nil "[0-9]$"))
+	     (groups (seq-group-by (lambda (issue)
+				     (car (tcor-segment-issue issue mag)))
+				   issues)))
+	(cl-loop for (group . issues) in groups
+		 do (cl-loop with start = 1
+			     for num in (mapcar (lambda (issue)
+						  (cdr (tcor-segment-issue issue mag)))
+						issues)
+			     do (cl-loop for i from start upto (1- num)
+					 do (insert (format "%s %s %03d\n" name group i)))
+			     (setq start (1+ num))))))))
+
+(defun tcor-segment-issue (issue mag)
+  (let* ((len (if (member mag '(CBG CSN)) 4 3))
+	 (num (substring issue (- (length issue) len))))
+    (if (string-match "^[0-9]+$" num)
+	(cons (substring issue 0 (- (length issue) len))
+	      (string-to-number num))
+      (and (string-match "[A-Z]+" issue)
+	   (cons (match-string 0 issue)
+		 (string-to-number (substring issue (match-end 0))))))))
+    
 
 (provide 'tcor)
 
