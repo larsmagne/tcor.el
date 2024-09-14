@@ -81,8 +81,9 @@
       (when (eq (cdr (assq 'IsErroredOnProcessing json))
 		t)
 	(message "%s: %s" (cdr (assq 'ErrorMessage json))
-		 (cdr (assq 'ErrorMessage
-			    (elt (cdr (assq 'ParsedResults json)) 0))))
+		 (ignore-errors
+		   (cdr (assq 'ErrorMessage
+			      (elt (cdr (assq 'ParsedResults json)) 0)))))
 	(sleep-for 2))
       (when (and json
 		 (eq (cdr (assq 'IsErroredOnProcessing json))
@@ -108,18 +109,51 @@
 			  (replace-regexp-in-string
 			   "[.][^.]+\\'" ".txt" file))))))))
 
+(defun tcor--identify (file)
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (call-process "identify" nil t nil (expand-file-name file))
+    (buffer-string)))
+
+(defun tcor-image-size (file)
+  (let ((size (mapcar #'string-to-number
+		      (split-string
+		       (nth 2 (split-string (tcor--identify file)))
+		       "x"))))
+    (cons (car size) (cadr size))))
+
 (defun tcor-resize-images ()
   (dolist (file (directory-files-recursively
-		 "~/src/kwakk/magscan/TCR/" "page.*jpg$"))
+		 "~/src/kwakk/magscan/" "page.*jpg$"))
     (when (and (not (file-exists-p (file-name-with-extension file "json")))
-	       (> (car (magscan-image-size file))
+	       (> (car (tcor-image-size file))
 		  3000))
       (message "Resizing %s" file)
       (call-process "mogrify" nil nil nil "-resize" "3000x"
 		    (expand-file-name (file-name-with-extension file "jpg"))))))
 
-(defun tcor-all ()
-  ;;(tcor-resize-images)
+(defun tcor-fix-big-images ()
+  (dolist (file (directory-files-recursively
+		 "~/src/kwakk/magscan/" "page.*jpg$"))
+    (when (and (not (file-exists-p (file-name-with-extension file "json")))
+	       (> (file-attribute-size (file-attributes file))
+		  (* 5120 1024)))
+      (message "Resizing for kb %s" file)
+      (when (file-exists-p "/tmp/tcor.jpg")
+	(delete-file "/tmp/tcor.jpg"))
+      (cl-loop for size from 3000 downto 1000 by 100
+	       do (call-process "convert" nil nil nil
+				"-resize" (format "%dx" size)
+				(expand-file-name file) "/tmp/tcor.jpg")
+	       while (> (file-attribute-size (file-attributes "/tmp/tcor.jpg"))
+			(* 5120 1024)))
+      (when (file-exists-p "/tmp/tcor.jpg")
+	(rename-file "/tmp/tcor.jpg" file t)))))
+
+(defun tcor-all (&optional skip-resize)
+  (unless skip-resize
+    (tcor-resize-images)
+    (tcor-fix-big-images))
   (dolist (file (directory-files-recursively
 		 "~/src/kwakk/magscan/"
 		 "page.*jpg$"))
@@ -128,18 +162,25 @@
       (tcor-ocr file t)))
   (magscan-covers-and-count))
 
+(defun tcor-sharded (instance)
+  (dolist (file (directory-files-recursively
+		 "~/src/kwakk/magscan/" "page.*jpg$"))
+    (when (and (not (file-exists-p (file-name-with-extension file "json")))
+	       (= (mod (string-to-number (sha1 file) 16) 5) instance))
+      (tcor-ocr file t))))
+
 (defun tcor-sort-by-size (files)
   (nreverse
    (sort files (lambda (f1 f2)
 		 (< (file-attribute-size (file-attributes f1))
 		    (file-attribute-size (file-attributes f2)))))))
 
-(defun tcor-unpack-cbr (dir mag)
+(defun tcor-unpack-cbr (dir mag &optional prefix)
   (dolist (cbr (tcor-sort-by-size (directory-files dir t "[.]cb[zr]$")))
     (when (string-match "\\b[0-9][0-9][0-9]\\b" cbr)
       (message "%s" cbr)
       (let* ((issue (match-string 0 cbr))
-	     (sub (expand-file-name (concat "" issue)
+	     (sub (expand-file-name (concat (or prefix "") issue)
 				    (format "~/src/kwakk/magscan/%s/" mag))))
 	(unless (file-exists-p sub)
 	  (make-directory sub t)
@@ -274,11 +315,11 @@
 		  (delete-file file))
 	     (delete-file jp-file))))))))
 
-(defun tcor-unpack-pdf (dir mag &optional inhibit-split)
+(defun tcor-unpack-pdf (dir mag &optional prefix inhibit-split)
   (dolist (pdf (directory-files dir t "[.]pdf$"))
     (when (string-match "\\b[0-9][0-9][0-9]\\b" pdf)
       (let* ((issue (match-string 0 pdf))
-	     (sub (expand-file-name issue
+	     (sub (expand-file-name (concat (or prefix "") issue)
 				    (format "~/src/kwakk/magscan/%s/" mag))))
 	(message "%s" pdf)
 	(unless (file-exists-p sub)
@@ -335,7 +376,7 @@
 	(message "%s" dir)
 	(unless (file-exists-p sub)
 	  (make-directory sub t)
-	  (dolist (file (directory-files dir t "webp\\|jpeg\\'"))
+	  (dolist (file (directory-files dir t "webp\\|jpeg\\|png\\'"))
 	    (call-process
 	     "convert" nil nil nil
 	     (file-truename file)
@@ -373,7 +414,30 @@
       (and (string-match "[A-Z]+" issue)
 	   (cons (match-string 0 issue)
 		 (string-to-number (substring issue (match-end 0))))))))
-    
+
+(defun tcor-delete-extra-pages (mag)
+  (switch-to-buffer "*extra*")
+  (dolist (dir (directory-files (format "~/src/kwakk/magscan/%s/" mag) t "[0-9]$"))
+    (dolist (file (seq-take (nreverse (directory-files dir t "page.*jpg")) 2))
+      (erase-buffer)
+      (insert-image (create-image file nil nil :max-height (frame-pixel-height)))
+      (when (y-or-n-p (format "Delete %s? " file))
+	(delete-file file)
+	(when (file-exists-p (file-name-with-extension file "txt"))
+	  (delete-file (file-name-with-extension file "txt")))
+	(when (file-exists-p (file-name-with-extension file "json"))
+	  (delete-file (file-name-with-extension file "json")))))))
+
+(defun tcor-split-into-issues (start pages)
+  (let ((files (directory-files "." nil "page.*jpg")))
+    (cl-loop for num from start
+	     for dir = (format "../SPL-%03d/" num)
+	     while files
+	     do
+	     (make-directory dir)
+	     (cl-loop for i from 1 upto pages
+		      do (rename-file (pop files)
+				      (format "%spage-%03d.jpg" dir i))))))
 
 (provide 'tcor)
 
