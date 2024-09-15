@@ -150,10 +150,13 @@
       (when (file-exists-p "/tmp/tcor.jpg")
 	(rename-file "/tmp/tcor.jpg" file t)))))
 
+(defun tcor-resize ()
+  (tcor-resize-images)
+  (tcor-fix-big-images))
+
 (defun tcor-all (&optional skip-resize)
   (unless skip-resize
-    (tcor-resize-images)
-    (tcor-fix-big-images))
+    (tcor-resize))
   (dolist (file (directory-files-recursively
 		 "~/src/kwakk/magscan/"
 		 "page.*jpg$"))
@@ -438,6 +441,36 @@
 	     (cl-loop for i from 1 upto pages
 		      do (rename-file (pop files)
 				      (format "%spage-%03d.jpg" dir i))))))
+
+(defun tcor-list-dirs-without-pages ()
+  (dolist (mag (directory-files "~/src/kwakk/magscan/" t "[A-Z]"))
+    (dolist (issue (directory-files mag t "[0-9]$"))
+      (unless (directory-files issue nil "page-001.jpg")
+	(message "Missing %s" issue)))))
+
+(defun tcor-index ()
+  (dolist (mag (directory-files "~/src/kwakk/magscan/" nil "[A-Z]"))
+    (let* ((dir (concat "~/src/kwakk/magscan/" mag))
+	   (newest (car
+		    (sort (directory-files-recursively dir "[.]txt\\'")
+			  #'file-newer-than-file-p)))
+	   (omega (expand-file-name (format "~/src/kwakk/omega.db/%s/docdata.glass" mag))))
+      (when (or (not (file-exists-p omega))
+		(file-newer-than-file-p newest omega))
+	(message "Indexing %s" mag)
+	(let ((default-directory (expand-file-name "~/src/kwakk/magscan/")))
+	  (call-process "rsync" nil nil nil
+			"-a" "--delete"
+			"--include=*/" "--include=*.txt" "--exclude=*"
+			(expand-file-name dir)
+			(concat "/tmp/" mag))
+	  (call-process "rm" nil nil nil
+			"-rf" (expand-file-name (concat "~/src/kwakk/omega.db/" mag)))
+	  (call-process "omindex" nil nil nil
+			"-S" "--db" (expand-file-name (concat "~/src/kwakk/omega.db/" mag))
+			"--url" "/"
+			"-E" "8000"
+			(concat "/tmp/" mag)))))))
 
 (provide 'tcor)
 
