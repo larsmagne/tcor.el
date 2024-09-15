@@ -472,6 +472,17 @@
 			"-E" "8000"
 			(concat "/tmp/" mag)))))))
 
+(defun tcor-count-pages ()
+  (dolist (mag (directory-files "~/src/kwakk/magscan/" nil "[A-Z]"))
+    (let* ((dir (concat "~/src/kwakk/magscan/" mag))
+	   (newest (car
+		    (sort (directory-files-recursively dir "[.]txt\\'")
+			  #'file-newer-than-file-p))))
+      (when (or (not (file-exists-p (expand-file-name "issues.json" dir)))
+		(file-newer-than-file-p newest (expand-file-name "issues.json" dir)))
+	(message "Counting %s" mag)
+	(magscan-count-pages dir)))))
+
 (provide 'tcor)
 
 ;;; tcor.el ends here
