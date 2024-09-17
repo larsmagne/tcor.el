@@ -170,7 +170,8 @@
 		 "~/src/kwakk/magscan/" "page.*jpg$"))
     (when (and (not (file-exists-p (file-name-with-extension file "json")))
 	       (= (mod (string-to-number (sha1 file) 16) 5) instance))
-      (tcor-ocr file t))))
+      (tcor-ocr file t)))
+  (kill-emacs))
 
 (defun tcor-sort-by-size (files)
   (nreverse
@@ -178,8 +179,13 @@
 		 (< (file-attribute-size (file-attributes f1))
 		    (file-attribute-size (file-attributes f2)))))))
 
+(defun tcor-import-file (mag)
+  (tcor-unpack-cbr (dired-get-marked-files nil current-prefix-arg) mag))
+
 (defun tcor-unpack-cbr (dir mag &optional prefix)
-  (dolist (cbr (tcor-sort-by-size (directory-files dir t "[.]cb[zr]$")))
+  (dolist (cbr (tcor-sort-by-size (if (consp dir)
+				      dir
+				    (directory-files dir t "[.]cb[zr]$"))))
     (when (string-match "\\b[0-9][0-9][0-9]\\b" cbr)
       (message "%s" cbr)
       (let* ((issue (match-string 0 cbr))
@@ -269,7 +275,7 @@
 
 (defun tcor-unpack-jp2 (dir mag)
   (dolist (zip (directory-files dir t "[.]zip$"))
-    (when (string-match "\\b[0-9][0-9][0-9][0-9]\\b" zip)
+    (when (string-match "\\b[0-9][0-9][0-9]\\b" zip)
       (message "%s" zip)
       (let* ((issue (match-string 0 zip))
 	     (sub (expand-file-name issue
@@ -369,7 +375,7 @@
 				     sub))
 		  (delete-file file)))))))))
 
-(defun tcor-import-directories (dir mag)
+(defun tcor-unpack-directories (dir mag)
   (dolist (dir (directory-files dir t "[0-9]"))
     (when (string-match "\\b[0-9][0-9][0-9]\\b" dir)
       (let* ((issue (match-string 0 dir))
@@ -448,14 +454,15 @@
       (unless (directory-files issue nil "page-001.jpg")
 	(message "Missing %s" issue)))))
 
-(defun tcor-index ()
-  (dolist (mag (directory-files "~/src/kwakk/magscan/" nil "[A-Z]"))
+(defun tcor-index (&optional mags force)
+  (dolist (mag (or mags (directory-files "~/src/kwakk/magscan/" nil "[A-Z]")))
     (let* ((dir (concat "~/src/kwakk/magscan/" mag))
 	   (newest (car
 		    (sort (directory-files-recursively dir "[.]txt\\'")
 			  #'file-newer-than-file-p)))
 	   (omega (expand-file-name (format "~/src/kwakk/omega.db/%s/docdata.glass" mag))))
-      (when (or (not (file-exists-p omega))
+      (when (or force
+		(not (file-exists-p omega))
 		(file-newer-than-file-p newest omega))
 	(message "Indexing %s" mag)
 	(let ((default-directory (expand-file-name "~/src/kwakk/magscan/")))
@@ -484,6 +491,50 @@
 		(file-newer-than-file-p newest (expand-file-name "issues.json" dir)))
 	(message "Counting %s" mag)
 	(magscan-count-pages dir)))))
+
+(defun tcor-gather-data ()
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (mag (directory-files "~/src/kwakk/magscan/" nil "[A-Z]"))
+      (let* ((dir (concat "~/src/kwakk/magscan/" mag "/"))
+	     (pages (length (directory-files-recursively dir "page.*jpg")))
+	     (issues (length (directory-files dir nil "[0-9]$"))))
+	(setf (gethash mag table)
+	      (list (cons 'issues issues)
+		    (cons 'pages pages)))))
+    (with-temp-buffer
+      (insert (json-encode table))
+      (write-region (point-min) (point-max) "~/src/kwakk/data.json"))))  
+
+(defun tcor-pre-ocr ()
+  (magscan-covers-and-count)
+  (tcor-resize))
+
+(defun tcor-post-ocr ()
+  (tcor-count-pages)
+  (tcor-gather-data)
+  (tcor-index))
+
+(defun tcor-find-credits-pages ()
+  (switch-to-buffer "*pages*")
+  (dolist (mag (directory-files "~/src/kwakk/magscan/" t "[A-Z]"))
+    (dolist (issue (directory-files mag t "[0-9]$"))
+      (dolist (file (nreverse (seq-take (nreverse (directory-files issue t "page.*jpg")) 2)))
+	(when (< (file-attribute-size (file-attributes file))
+		 (* 200 1024))
+	  (erase-buffer)
+	  (insert-image (create-image file nil nil :max-height (frame-pixel-height)))
+	  (when (y-or-n-p (format "Delete %s? " file))
+	    (delete-file file)
+	    (when (file-exists-p (file-name-with-extension file "txt"))
+	      (delete-file (file-name-with-extension file "txt")))
+	    (when (file-exists-p (file-name-with-extension file "json"))
+	      (delete-file (file-name-with-extension file "json")))))))))
+
+(defun tcor-simple ()
+  (tcor-pre-ocr)
+  (dotimes (_ 5)
+    (tcor-all t))
+  (tcor-post-ocr))
 
 (provide 'tcor)
 
