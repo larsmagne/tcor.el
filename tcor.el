@@ -72,6 +72,7 @@
   (message "OCR-ing %s" file)
   (let ((data (tcor-upload file no-process))
 	(coding-system-for-write 'utf-8)
+	(got-error nil)
 	json)
     (with-temp-buffer
       (insert (or data ""))
@@ -84,6 +85,7 @@
 		 (ignore-errors
 		   (cdr (assq 'ErrorMessage
 			      (elt (cdr (assq 'ParsedResults json)) 0)))))
+	(setq got-error t)
 	(sleep-for 2))
       (when (and json
 		 (eq (cdr (assq 'IsErroredOnProcessing json))
@@ -107,7 +109,8 @@
 	      (replace-match "" t t))
 	    (write-region (point-min) (point-max)
 			  (replace-regexp-in-string
-			   "[.][^.]+\\'" ".txt" file))))))))
+			   "[.][^.]+\\'" ".txt" file))))))
+    got-error))
 
 (defun tcor--identify (file)
   (with-temp-buffer
@@ -154,16 +157,15 @@
   (tcor-resize-images)
   (tcor-fix-big-images))
 
-(defun tcor-all (&optional skip-resize)
-  (unless skip-resize
-    (tcor-resize))
-  (dolist (file (directory-files-recursively
-		 "~/src/kwakk/magscan/"
-		 "page.*jpg$"))
-    (unless (file-exists-p
-	     (replace-regexp-in-string "[.][^.]+\\'" ".json" file))
-      (tcor-ocr file t)))
-  (magscan-covers-and-count))
+(defun tcor-all ()
+  (let ((errors nil))
+    (dolist (file (directory-files-recursively
+		   "~/src/kwakk/magscan/" "page.*jpg$"))
+      (unless (file-exists-p
+	       (replace-regexp-in-string "[.][^.]+\\'" ".json" file))
+	(when (tcor-ocr file t)
+	  (setq errors t))))
+    errors))
 
 (defun tcor-sharded (instance)
   (dolist (file (directory-files-recursively
@@ -179,8 +181,15 @@
 		 (< (file-attribute-size (file-attributes f1))
 		    (file-attribute-size (file-attributes f2)))))))
 
-(defun tcor-import-file (mag)
-  (tcor-unpack-cbr (dired-get-marked-files nil current-prefix-arg) mag))
+(defun tcor-import-file (mag &optional prefix)
+  (dolist (file (dired-get-marked-files nil current-prefix-arg))
+    (cond
+     ((string-match "pdf$" file)
+      (tcor-unpack-pdf (list file) mag prefix))
+     ((string-match "[.]cb[rz]$" file)
+      (tcor-unpack-cbr (list file) mag prefix))
+     ((string-match "jp2.*zip" file)
+      (tcor-unpack-jp2 (list file) mag prefix)))))
 
 (defun tcor-unpack-cbr (dir mag &optional prefix)
   (dolist (cbr (tcor-sort-by-size (if (consp dir)
@@ -273,12 +282,14 @@
 	     (cons (gethash "identifier" (gethash "fields" hit))
 		   (gethash "title" (gethash "fields" hit))))))
 
-(defun tcor-unpack-jp2 (dir mag)
-  (dolist (zip (directory-files dir t "[.]zip$"))
+(defun tcor-unpack-jp2 (dir mag &optional prefix)
+  (dolist (zip (if (consp dir)
+		   dir
+		 (directory-files dir t "[.]zip$")))
     (when (string-match "\\b[0-9][0-9][0-9]\\b" zip)
       (message "%s" zip)
       (let* ((issue (match-string 0 zip))
-	     (sub (expand-file-name issue
+	     (sub (expand-file-name (concat (or prefix "") issue)
 				    (format "~/src/kwakk/magscan/%s/" mag))))
 	(unless (file-exists-p sub)
 	  (make-directory sub t)
@@ -325,7 +336,9 @@
 	     (delete-file jp-file))))))))
 
 (defun tcor-unpack-pdf (dir mag &optional prefix inhibit-split)
-  (dolist (pdf (directory-files dir t "[.]pdf$"))
+  (dolist (pdf (if (consp dir)
+		   dir
+		 (directory-files dir t "[.]pdf$")))
     (when (string-match "\\b[0-9][0-9][0-9]\\b" pdf)
       (let* ((issue (match-string 0 pdf))
 	     (sub (expand-file-name (concat (or prefix "") issue)
@@ -485,7 +498,9 @@
 	   (newest (car
 		    (sort (append (directory-files-recursively dir "[.]txt\\'")
 				  (and (file-exists-p (expand-file-name "suppress-covers.txt" dir))
-				       (list (expand-file-name "suppress-covers.txt" dir))))
+				       (list (expand-file-name "suppress-covers.txt" dir)))
+				  (and (file-exists-p (expand-file-name "double-issues.txt" dir))
+				       (list (expand-file-name "double-issues.txt" dir))))
 			  #'file-newer-than-file-p))))
       (when (or (not (file-exists-p (expand-file-name "issues.json" dir)))
 		(file-newer-than-file-p newest (expand-file-name "issues.json" dir)))
@@ -530,10 +545,12 @@
 	    (when (file-exists-p (file-name-with-extension file "json"))
 	      (delete-file (file-name-with-extension file "json")))))))))
 
-(defun tcor-simple ()
+(defun tcor-do ()
   (tcor-pre-ocr)
-  (dotimes (_ 5)
-    (tcor-all t))
+  ;; Loop while there's errors.
+  (cl-loop for i from 0 upto 10
+	   while (tcor-all)
+	   do (tcor-resize))
   (tcor-post-ocr))
 
 (provide 'tcor)
