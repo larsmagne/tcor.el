@@ -388,11 +388,11 @@
 				     sub))
 		  (delete-file file)))))))))
 
-(defun tcor-unpack-directories (dir mag)
+(defun tcor-unpack-directories (dir mag &optional prefix)
   (dolist (dir (directory-files dir t "[0-9]"))
     (when (string-match "\\b[0-9][0-9][0-9]\\b" dir)
       (let* ((issue (match-string 0 dir))
-	     (sub (expand-file-name issue
+	     (sub (expand-file-name (concat (or prefix "") issue)
 				    (format "~/src/kwakk/magscan/%s/" mag)))
 	     (i 0))
 	(message "%s" dir)
@@ -471,7 +471,7 @@
   (dolist (mag (or mags (directory-files "~/src/kwakk/magscan/" nil "[A-Z]")))
     (let* ((dir (concat "~/src/kwakk/magscan/" mag))
 	   (newest (car
-		    (sort (directory-files-recursively dir "[.]txt\\'")
+		    (sort (directory-files-recursively dir "[.]txt\\'\\|issues.json")
 			  #'file-newer-than-file-p)))
 	   (omega (expand-file-name (format "~/src/kwakk/omega.db/%s/docdata.glass" mag))))
       (when (or force
@@ -529,13 +529,15 @@
   (tcor-gather-data)
   (tcor-index))
 
-(defun tcor-find-credits-pages ()
+(defun tcor-find-credits-pages (&optional mag)
   (switch-to-buffer "*pages*")
-  (dolist (mag (directory-files "~/src/kwakk/magscan/" t "[A-Z]"))
+  (dolist (mag (if mag
+		   (list (expand-file-name mag "~/src/kwakk/magscan/"))
+		 (directory-files "~/src/kwakk/magscan/" t "[A-Z]")))
     (dolist (issue (directory-files mag t "[0-9]$"))
       (dolist (file (nreverse (seq-take (nreverse (directory-files issue t "page.*jpg")) 2)))
 	(when (< (file-attribute-size (file-attributes file))
-		 (* 200 1024))
+		 (* 500 1024))
 	  (erase-buffer)
 	  (insert-image (create-image file nil nil :max-height (frame-pixel-height)))
 	  (when (y-or-n-p (format "Delete %s? " file))
@@ -543,7 +545,9 @@
 	    (when (file-exists-p (file-name-with-extension file "txt"))
 	      (delete-file (file-name-with-extension file "txt")))
 	    (when (file-exists-p (file-name-with-extension file "json"))
-	      (delete-file (file-name-with-extension file "json")))))))))
+	      (delete-file (file-name-with-extension file "json")))
+	    (when (file-exists-p (expand-file-name "issues.json" mag))
+	      (delete-file (expand-file-name "issues.json" mag)))))))))
 
 (defun tcor-do ()
   (tcor-pre-ocr)
