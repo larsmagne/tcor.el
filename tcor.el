@@ -191,12 +191,15 @@
 	      ((string-match "[.]cb[rz]$" file)
 	       (tcor-unpack-cbr (list file) mag prefix))
 	      ((string-match "jp2.*zip" file)
-	       (tcor-unpack-jp2 (list file) mag prefix))))
+	       (tcor-unpack-jp2 (list file) mag prefix))
+	      ((file-directory-p file)
+	       (tcor-unpack-directories (list file) mag prefix))))
       (when (file-exists-p dir)
 	(let ((first (car (directory-files dir t "page.*jpg"))))
 	  (if (not first)
 	      (message "Error: No pages in %s" dir)
-	    (find-file first)))))))
+	    (find-file first))))))
+  (tcor-find-empty-directories))
 
 (defun tcor-unpack (mag &optional prefix)
   (dolist (file (tcor-sort-by-size
@@ -420,7 +423,9 @@
     subs))
 
 (defun tcor-unpack-directories (dir mag &optional prefix)
-  (dolist (dir (directory-files dir t "[0-9]"))
+  (dolist (dir (if (consp dir)
+		   dir
+		 (directory-files dir t "[0-9]")))
     (when (string-match (tcor-issue-match mag) dir)
       (let* ((issue (match-string 0 dir))
 	     (sub (expand-file-name (concat (or prefix "") issue)
@@ -435,7 +440,7 @@
 	     (file-truename file)
 	     (expand-file-name (format "page-%03d.jpg" (cl-incf i)) sub))))))))
 
-(defun tcor-list-missing-issues (mag &optional browse first)
+(defun tcor-list-missing-issues (mag &optional browse first archive)
   (let* ((data (with-temp-buffer
 		 (insert-file-contents "~/src/kwakk/magazines.json")
 		 (json-read)))
@@ -464,11 +469,12 @@
 					   do
 					   (insert string "\n")
 					   (when browse
-					     (tcor-browse-url-firefox (format "https://archive.org/search?query=%s"
-									      string))
-					     (when (string-match " 0" string)
+					     (when archive
 					       (tcor-browse-url-firefox (format "https://archive.org/search?query=%s"
-										(replace-regexp-in-string " 0+" " " string))))
+										string))
+					       (when (string-match " 0" string)
+						 (tcor-browse-url-firefox (format "https://archive.org/search?query=%s"
+										  (replace-regexp-in-string " 0+" " " string)))))
 					     (tcor-browse-url-firefox (format "https://annas-archive.org/search?q=%s"
 									      string))
 					     (when (string-match " 0" string)
@@ -628,16 +634,18 @@ instead of `browse-url-new-window-flag'."
 	    (when (file-exists-p (expand-file-name "issues.json" mag))
 	      (delete-file (expand-file-name "issues.json" mag)))))))))
 
-(defun tcor-list-all-mags ()
+(defun tcor-list-all-mags (&optional category)
   (switch-to-buffer "*list*")
   (erase-buffer)
   (dolist (mag (with-temp-buffer
 		 (insert-file-contents "~/src/kwakk/magazines.json")
 		 (json-read)))
-    (if (memq (car mag) '(MIF MIM MII MIP))
-	(dolist (name (cdr (assq 'prefix (cdr mag))))
-	  (insert (cdr name) ", "))
-      (insert (cdr (assq 'name (cdr mag))) ", "))))
+    (when (or (not category)
+	      (equal category (cdr (assq 'cat (cdr mag)))))
+      (if (memq (car mag) '(MIF MIM MII MIP))
+	  (dolist (name (cdr (assq 'prefix (cdr mag))))
+	    (insert (cdr name) ", "))
+	(insert (cdr (assq 'name (cdr mag))) ", ")))))
 
 (defun tcor-link-all-mags ()
   (switch-to-buffer "*list*")
@@ -645,14 +653,15 @@ instead of `browse-url-new-window-flag'."
   (dolist (mag (with-temp-buffer
 		 (insert-file-contents "~/src/kwakk/magazines.json")
 		 (json-read)))
-    (if (memq (car mag) '(MIF MIM MII MIP))
-	(dolist (name (cdr (assq 'prefix (cdr mag))))
-	  (insert (format "<a href='https://kwakk.info/%s/'>%s</a>, "
-			  (downcase (symbol-name (car mag)))
-			  (cdr name))))
-      (insert (format "<a href='https://kwakk.info/%s/'>%s</a>, "
-		      (downcase (symbol-name (car mag)))
-		      (cdr (assq 'name (cdr mag))))))))
+    (unless (cdr (assq 'hidden (cdr mag)))
+      (if (memq (car mag) '(MIF MIM MII MIP))
+	  (dolist (name (cdr (assq 'prefix (cdr mag))))
+	    (insert (format "<a href='https://kwakk.info/%s/'>%s</a>, "
+			    (downcase (symbol-name (car mag)))
+			    (cdr name))))
+	(insert (format "<a href='https://kwakk.info/%s/'>%s</a>, "
+			(downcase (symbol-name (car mag)))
+			(cdr (assq 'name (cdr mag)))))))))
 
 
 (defun tcor-do ()
@@ -663,6 +672,74 @@ instead of `browse-url-new-window-flag'."
 	   while (tcor-all)
 	   do (sleep-for 1))
   (tcor-post-ocr))
+
+(defun tcor-unpack-datafile (dir mag &optional prefix)
+  (dolist (data (directory-files dir t "DataFile"))
+    (when (string-match (tcor-issue-match mag) data)
+	(let* ((issue (match-string 0 data))
+	       (sub (expand-file-name (concat (or prefix "") issue)
+				      (format "~/src/kwakk/magscan/%s/" mag)))
+	       (i 0))
+	(message "%s" dir)
+	(unless (file-exists-p sub)
+	  (make-directory sub t)
+	  (with-temp-buffer
+	    (insert-file-contents data)
+	    (while (not (eobp))
+	      (when (looking-at "data:image/png;base64,")
+		(goto-char (match-end 0))
+		(setq data (buffer-substring (point) (pos-eol)))
+		(with-temp-buffer
+		  (set-buffer-multibyte nil)
+		  (insert (base64-decode-string data))
+		  (call-process-region
+		   (point-min) (point-max)
+		   "convert" nil nil nil
+		   "png:-" 
+		   (expand-file-name
+		    (format "page-%03d.jpg" (cl-incf i)) sub))))
+	      (forward-line 1))))))))
+
+;; https://www.comicsfanzines.co.uk/s-z/speakeasy-81-120
+(defun tcor-fetch-views (url)
+  (let ((dom
+	 (with-current-buffer (url-retrieve-synchronously url)
+	   (goto-char (point-min))
+	   (search-forward "\n\n")
+	   (prog1
+	       (libxml-parse-html-region (point) (point-max))
+	     (kill-buffer (current-buffer))))))
+    dom))
+
+(defun tcor-parse-views (dom)
+  (cl-loop for link in (dom-by-tag dom 'a)
+	   for url = (dom-attr link 'href)
+	   for issue = (string-trim (dom-texts (dom-parent dom (dom-parent dom link))))
+	   when (and url
+		     (string-match "drive.google.*/view" url)
+		     (not (zerop (length issue))))
+	   collect (list url (replace-regexp-in-string
+			      "[^a-zA-Z0-9]" "-"
+			      (replace-regexp-in-string
+			       "\\([0-9]+\\) +\\([()/0-9]+\\)\\'"
+			       "\\1\\2" issue)))))
+
+(defun tcor-view-urls (url)
+  (let ((list (tcor-parse-views (tcor-fetch-views url)))
+	(table (make-hash-table :test #'equal)))
+    (with-temp-buffer
+      (dolist (elem list)
+	(unless (gethash (car elem) table)
+	  (insert (cadr elem) " " (car elem) "\n")
+	  (setf (gethash (car elem) table) t)))
+      (write-region (point-min) (point-max) "/tmp/urls.txt" t))))
+
+(defun tcor-find-empty-directories ()
+  (interactive)
+  (dolist (mag (directory-files "~/src/kwakk/magscan/" t "[A-Z]"))
+    (dolist (issue (directory-files mag t "[0-9]$"))
+      (unless (file-exists-p (expand-file-name "page-001.jpg" issue))
+	(find-file issue)))))
 
 (provide 'tcor)
 
