@@ -673,33 +673,6 @@ instead of `browse-url-new-window-flag'."
 	   do (sleep-for 1))
   (tcor-post-ocr))
 
-(defun tcor-unpack-datafile (dir mag &optional prefix)
-  (dolist (data (directory-files dir t "DataFile"))
-    (when (string-match (tcor-issue-match mag) data)
-	(let* ((issue (match-string 0 data))
-	       (sub (expand-file-name (concat (or prefix "") issue)
-				      (format "~/src/kwakk/magscan/%s/" mag)))
-	       (i 0))
-	(message "%s" dir)
-	(unless (file-exists-p sub)
-	  (make-directory sub t)
-	  (with-temp-buffer
-	    (insert-file-contents data)
-	    (while (not (eobp))
-	      (when (looking-at "data:image/png;base64,")
-		(goto-char (match-end 0))
-		(setq data (buffer-substring (point) (pos-eol)))
-		(with-temp-buffer
-		  (set-buffer-multibyte nil)
-		  (insert (base64-decode-string data))
-		  (call-process-region
-		   (point-min) (point-max)
-		   "convert" nil nil nil
-		   "png:-" 
-		   (expand-file-name
-		    (format "page-%03d.jpg" (cl-incf i)) sub))))
-	      (forward-line 1))))))))
-
 ;; https://www.comicsfanzines.co.uk/s-z/speakeasy-81-120
 (defun tcor-fetch-views (url)
   (let ((dom
