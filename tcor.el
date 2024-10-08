@@ -27,7 +27,7 @@
 (defvar tcor-api-key nil)
 (defvar tcor-inhibit-split nil)
 
-(defun tcor-upload (file &optional no-process)
+(defun tcor-upload (file &optional no-process language)
   (let* ((url-request-method "POST")
 	 (boundary "--14--")
 	 (url-request-extra-headers
@@ -38,6 +38,7 @@
 	   `(("apikey" . ,tcor-api-key)
 	     ("isOverlayRequired" . "true")
 	     ("scale" . "true")
+	     ("language" . ,(or language "eng"))
 	     ;;("OCREngine" . "2")
 	     ("file" . (("filedata" . ,(with-temp-buffer
 					 (set-buffer-multibyte nil)
@@ -69,9 +70,14 @@
 	    (buffer-substring (point) (point-max)))
 	(kill-buffer (current-buffer))))))
 
+(defun tcor-language (file)
+  (let* ((mag (car (last (file-name-split file) 3)))
+	 (data (assq (intern mag) (tcor-magazines))))
+    (cdr (assq 'lang (cdr data)))))
+
 (defun tcor-ocr (file &optional no-process)
   (message "OCR-ing %s" file)
-  (let ((data (tcor-upload file no-process))
+  (let ((data (tcor-upload file no-process (tcor-language file)))
 	(coding-system-for-write 'utf-8)
 	(got-error nil)
 	json)
@@ -172,7 +178,7 @@
   (dolist (file (directory-files-recursively
 		 "~/src/kwakk/magscan/" "page.*jpg$"))
     (when (and (not (file-exists-p (file-name-with-extension file "json")))
-	       (= (mod (string-to-number (sha1 file) 16) 5) instance))
+	       (= (mod (string-to-number (sha1 file) 16) 10) instance))
       (tcor-ocr file t)))
   (kill-emacs))
 
@@ -182,8 +188,12 @@
 		 (< (file-attribute-size (file-attributes f1))
 		    (file-attribute-size (file-attributes f2)))))))
 
+(defun tcor-import-files (mag &optional prefix)
+  (tcor-import-file mag prefix
+		    (directory-files "." t "jp2.*zip\\|[.]cb[rz]$\\|pdf$")))
+
 (defun tcor-import-file (mag &optional prefix files)
-  (dolist (file (or files (dired-get-marked-files nil current-prefix-arg)))
+  (dolist (file (tcor-sort-by-size (or files (dired-get-marked-files nil current-prefix-arg))))
     (dolist (dir
 	     (cond
 	      ((string-match "pdf$" file)
@@ -236,33 +246,43 @@
 		(delete-file file))
 	      (cl-loop
 	       with i = 0
-	       for file in (directory-files sub t "[.][jJ][pP][eE]?[gG]$")
+	       for file in (let ((case-fold-search t))
+			     (directory-files sub t "[.]\\(jpe?g\\|webp\\)\\'"))
 	       for size = (magscan-image-size file)
-	       do (if (or tcor-inhibit-split
-			  (< (car size) (cdr size)))
-		      ;; Vertical
-		      (rename-file file
+	       do
+	       (call-process "chmod" nil nil nil "u+rw" file)
+	       (if (or tcor-inhibit-split
+		       (< (car size) (cdr size)))
+		   ;; Vertical
+		   (if (let ((case-fold-search t))
+			 (string-match "[.]jpe?g\\'" file))
+		       (rename-file file
+				    (expand-file-name (format "page-%03d.jpg"
+							      (cl-incf i))
+						      sub))
+		     (call-process "convert" nil nil nil
+				   (expand-file-name file)
 				   (expand-file-name (format "page-%03d.jpg"
 							     (cl-incf i))
-						     sub))
-		    ;; Horizontal.
-		    (call-process
-		     "convert" nil nil nil
-		     "-crop" (format "%sx%s+0+0" (/ (car size) 2) (cdr size))
-		     (file-truename file)
-		     (expand-file-name (format "page-%03d.jpg" (cl-incf i))
-				       sub))
-		    (call-process
-		     "convert" nil nil nil
-		     "-crop" (format "%sx%s+%s-0"
-				     (/ (car size) 2)
-				     (cdr size)
-				     (/ (car size) 2))
-		     ;; "1949x3064+1949-0"
-		     (file-truename file)
-		     (expand-file-name (format "page-%03d.jpg" (cl-incf i))
-				       sub))
-		    (delete-file file))))
+						     sub)))
+		 ;; Horizontal.
+		 (call-process
+		  "convert" nil nil nil
+		  "-crop" (format "%sx%s+0+0" (/ (car size) 2) (cdr size))
+		  (file-truename file)
+		  (expand-file-name (format "page-%03d.jpg" (cl-incf i))
+				    sub))
+		 (call-process
+		  "convert" nil nil nil
+		  "-crop" (format "%sx%s+%s-0"
+				  (/ (car size) 2)
+				  (cdr size)
+				  (/ (car size) 2))
+		  ;; "1949x3064+1949-0"
+		  (file-truename file)
+		  (expand-file-name (format "page-%03d.jpg" (cl-incf i))
+				    sub))
+		 (delete-file file))))
 	    (push sub subs)))))
     subs))
 
@@ -440,10 +460,13 @@
 	     (file-truename file)
 	     (expand-file-name (format "page-%03d.jpg" (cl-incf i)) sub))))))))
 
+(defun tcor-magazines ()
+  (with-temp-buffer
+    (insert-file-contents "~/src/kwakk/magazines.json")
+    (json-read)))
+
 (defun tcor-list-missing-issues (mag &optional browse first archive)
-  (let* ((data (with-temp-buffer
-		 (insert-file-contents "~/src/kwakk/magazines.json")
-		 (json-read)))
+  (let* ((data (tcor-magazines))
 	 (elem (cdr (assq (intern mag) data))))
     (unless elem
       (user-error "No such mag: %s" mag))
