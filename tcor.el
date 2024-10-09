@@ -135,12 +135,13 @@
 (defun tcor-resize-images ()
   (dolist (file (directory-files-recursively
 		 "~/src/kwakk/magscan/" "page.*jpg$"))
-    (when (and (not (file-exists-p (file-name-with-extension file "json")))
-	       (> (car (tcor-image-size file))
-		  3000))
-      (message "Resizing %s" file)
-      (call-process "mogrify" nil nil nil "-resize" "3000x"
-		    (expand-file-name (file-name-with-extension file "jpg"))))))
+    (let (size)
+      (when (and (not (file-exists-p (file-name-with-extension file "json")))
+		 (or (> (car (setq size (tcor-image-size file))) 3000)
+		     (> (cdr size) 5000)))
+	(message "Resizing %s" file)
+	(call-process "mogrify" nil nil nil "-resize" "3000x5000>"
+		      (expand-file-name file))))))
 
 (defun tcor-fix-big-images ()
   (dolist (file (directory-files-recursively
