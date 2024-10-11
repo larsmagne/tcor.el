@@ -1,8 +1,8 @@
 #!/bin/bash
 
-for i in 0 1 2 3 4 5 6 7 8 9; do
+for i in `seq 0 9`; do
     ~/src/emacs/trunk/src/emacs -l ~/src/magscan.el/magscan.el \
-				--eval "(tcor-sharded $i)" &
+				--eval "(tcor-sharded $i 10)" &
 done
 
 for job in `jobs -p`; do
