@@ -122,14 +122,12 @@
 (defun tcor--identify (file)
   (with-temp-buffer
     (set-buffer-multibyte nil)
-    (call-process "identify" nil t nil (expand-file-name file))
+    (call-process "identify" nil t nil "-format" "%w %h"
+		  (expand-file-name file))
     (buffer-string)))
 
 (defun tcor-image-size (file)
-  (let ((size (mapcar #'string-to-number
-		      (split-string
-		       (nth 2 (split-string (tcor--identify file)))
-		       "x"))))
+  (let ((size (mapcar #'string-to-number (split-string (tcor--identify file)))))
     (cons (car size) (cadr size))))
 
 (defun tcor-resize-images ()
@@ -148,7 +146,7 @@
 		 "~/src/kwakk/magscan/" "page.*jpg$"))
     (when (and (not (file-exists-p (file-name-with-extension file "json")))
 	       (> (file-attribute-size (file-attributes file))
-		  (* 5120 1024)))
+		  (* 5000 1024)))
       (message "Resizing for kb %s" file)
       (when (file-exists-p "/tmp/tcor.jpg")
 	(delete-file "/tmp/tcor.jpg"))
@@ -157,7 +155,7 @@
 				"-resize" (format "%dx" size)
 				(expand-file-name file) "/tmp/tcor.jpg")
 	       while (> (file-attribute-size (file-attributes "/tmp/tcor.jpg"))
-			(* 5120 1024)))
+			(* 5000 1024)))
       (when (file-exists-p "/tmp/tcor.jpg")
 	(rename-file "/tmp/tcor.jpg" file t)))))
 
@@ -175,11 +173,11 @@
 	  (setq errors t))))
     errors))
 
-(defun tcor-sharded (instance)
+(defun tcor-sharded (instance instances)
   (dolist (file (directory-files-recursively
 		 "~/src/kwakk/magscan/" "page.*jpg$"))
     (when (and (not (file-exists-p (file-name-with-extension file "json")))
-	       (= (mod (string-to-number (sha1 file) 16) 10) instance))
+	       (= (mod (string-to-number (sha1 file) 16) instances) instance))
       (tcor-ocr file t)))
   (kill-emacs))
 
@@ -248,8 +246,8 @@
 	      (cl-loop
 	       with i = 0
 	       for file in (let ((case-fold-search t))
-			     (directory-files sub t "[.]\\(jpe?g\\|webp\\)\\'"))
-	       for size = (magscan-image-size file)
+			     (directory-files sub t "[.]\\([jJ][pP][eE]?[gG]\\|[wW][eE][bB][pP]\\)\\'"))
+	       for size = (tcor-image-size file)
 	       do
 	       (call-process "chmod" nil nil nil "u+rw" file)
 	       (if (or tcor-inhibit-split
@@ -351,12 +349,12 @@
 	       for jp-file in (directory-files sub t "[.][jJ][pP]2$")
 	       for file = (file-name-with-extension jp-file ".jpg")
 	       do (call-process "convert" nil nil nil jp-file file)
-	       for size = (magscan-image-size file)
+	       for size = (tcor-image-size file)
 	       do (when (> (car size) 3000)
 		    (call-process "gm" nil nil nil
 				  "mogrify" "-resize" "3000x"
 				  file)
-		    (setq size (magscan-image-size file)))
+		    (setq size (tcor-image-size file)))
 	       do (if (or tcor-inhibit-split
 			  (< (car size) (cdr size)))
 		      ;; Vertical
@@ -413,7 +411,7 @@
 			      (call-process "mogrify" nil nil nil
 					    "-rotate" "270"
 					    file))
-			    (magscan-image-size file))
+			    (tcor-image-size file))
 	       do (if (or tcor-inhibit-split
 			  inhibit-split
 			  (< (car size) (cdr size)))
@@ -638,25 +636,47 @@ instead of `browse-url-new-window-flag'."
   (tcor-gather-data)
   (tcor-index))
 
-(defun tcor-find-credits-pages (&optional mag)
-  (switch-to-buffer "*pages*")
-  (dolist (mag (if mag
-		   (list (expand-file-name mag "~/src/kwakk/magscan/"))
-		 (directory-files "~/src/kwakk/magscan/" t "[A-Z]")))
-    (dolist (issue (directory-files mag t "[0-9]$"))
-      (dolist (file (nreverse (seq-take (nreverse (directory-files issue t "page.*jpg")) 2)))
-	(when (< (file-attribute-size (file-attributes file))
-		 (* 500 1024))
+(defun tcor-find-credits-pages (&optional hours mag start)
+  (let ((files nil))
+    (dolist (mag (if mag
+		     (list (expand-file-name mag "~/src/kwakk/magscan/"))
+		   (directory-files "~/src/kwakk/magscan/" t "[A-Z]")))
+      (dolist (issue (directory-files mag t "[0-9]$"))
+	(dolist (file (nreverse (seq-take (nreverse (directory-files issue t "page.*jpg")) 4)))
+	  (when (and (< (file-attribute-size (file-attributes file)) (* 500 1024))
+		     (or (not hours)
+			 (> (float-time (file-attribute-modification-time (file-attributes issue)))
+			    (- (float-time) (* hours 60 60)))))
+	    (push file files)))))
+    (setq files (nreverse files))
+    (catch 'stop
+      (let ((i (or start 0)))
+	(while (< i (length files))
+	  (setq file (elt files i))
+	  (switch-to-buffer "*pages*")
 	  (erase-buffer)
-	  (insert-image (create-image file nil nil :max-height (frame-pixel-height)))
-	  (when (y-or-n-p (format "Delete %s? " file))
-	    (delete-file file)
-	    (when (file-exists-p (file-name-with-extension file "txt"))
-	      (delete-file (file-name-with-extension file "txt")))
-	    (when (file-exists-p (file-name-with-extension file "json"))
-	      (delete-file (file-name-with-extension file "json")))
-	    (when (file-exists-p (expand-file-name "issues.json" mag))
-	      (delete-file (expand-file-name "issues.json" mag)))))))))
+	  (insert-image (create-image file nil nil :max-height (truncate (* (frame-pixel-height) 0.9))))
+	  (let ((answer (car (read-multiple-choice (format "Delete %s?" file)
+						   '((?y "Yes")
+						     (?n "No")
+						     (?p "Prev")
+						     (?s "Stop"))))))
+	    (cond
+	     ((= answer ?y)
+	      (delete-file file)
+	      (when (file-exists-p (file-name-with-extension file "txt"))
+		(delete-file (file-name-with-extension file "txt")))
+	      (when (file-exists-p (file-name-with-extension file "json"))
+		(delete-file (file-name-with-extension file "json")))
+	      (when (file-exists-p (expand-file-name "issues.json" mag))
+		(delete-file (expand-file-name "issues.json" mag)))
+	      (cl-incf i))
+	     ((= answer ?n)
+	      (cl-incf i))
+	     ((= answer ?s)
+	      (throw 'stop i))
+	     (t
+	      (cl-decf i)))))))))
 
 (defun tcor-list-all-mags (&optional category)
   (switch-to-buffer "*list*")
@@ -738,6 +758,40 @@ instead of `browse-url-new-window-flag'."
       (unless (file-exists-p (expand-file-name "page-001.jpg" issue))
 	(find-file issue)))))
 
+(defun tcor-view (file)
+  (interactive (list (car (dired-get-marked-files nil current-prefix-arg))))
+  (cond
+   ((string-match "[.]pdf\\'" file)
+    (call-process "xxpdf" nil nil nil file))
+   ((string-match "z$\\|zip$" file)
+    (with-temp-buffer
+      (call-process "unzip" nil t nil "-l" file)
+      (goto-char (point-min))
+      (forward-line 6)
+      (message "%s" (buffer-substring (point) (pos-eol 5)))))
+   ((string-match "r\\'" file)
+    (with-temp-buffer
+      (call-process "unrar" nil t nil "l" file)
+      (goto-char (point-min))
+      (forward-line 8)
+      (message "%s" (buffer-substring (point) (pos-eol 6)))))))
+
+(keymap-global-set "H-i" #'tcor-view)
+
+(defun tcor-find-discontinuities ()
+  (dolist (mag (directory-files "~/src/kwakk/magscan/" t "[A-Z]"))
+    (dolist (issue (directory-files mag t "[0-9]$"))
+      (let* ((pages (sort (directory-files issue nil "page.*jpg\\'")
+			  #'string-version-lessp))
+	     (last (car (last pages))))
+	(unless (= (length pages)
+		   (and (string-match "[0-9]+" last)
+			(string-to-number (match-string 0 last))))
+	  (find-file issue)
+	  (error "Num %s; last %s" (length pages) last))))))
+
 (provide 'tcor)
+
+;; List 20 Italian-language magazines and fanzines about comic books (but exclude comic book magazines as well as online magazines).
 
 ;;; tcor.el ends here
