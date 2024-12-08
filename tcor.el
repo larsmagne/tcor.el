@@ -38,8 +38,8 @@
 	   `(("apikey" . ,tcor-api-key)
 	     ("isOverlayRequired" . "true")
 	     ("scale" . "true")
-	     ("language" . ,(or language "eng"))
-	     ;;("OCREngine" . "2")
+	     ;;("language" . ,(or language "eng"))
+	     ("OCREngine" . "2")
 	     ("file" . (("filedata" . ,(with-temp-buffer
 					 (set-buffer-multibyte nil)
 					 (insert-file-contents file)
@@ -76,6 +76,7 @@
     (cdr (assq 'lang (cdr data)))))
 
 (defun tcor-ocr (file &optional no-process)
+  ;;(setq debug-on-error t)
   (message "OCR-ing %s" file)
   (let ((data (tcor-upload file no-process (tcor-language file)))
 	(coding-system-for-write 'utf-8)
@@ -88,10 +89,12 @@
 		   (json-read)))
       (when (eq (cdr (assq 'IsErroredOnProcessing json))
 		t)
-	(message "%s: %s" (cdr (assq 'ErrorMessage json))
-		 (ignore-errors
-		   (cdr (assq 'ErrorMessage
-			      (elt (cdr (assq 'ParsedResults json)) 0)))))
+	(if (stringp (assq 'ErrorMessage json))
+	    (message "%s" (assq 'ErrorMessage json))
+	  (message "%s: %s"  (ignore-errors (cdr (assq 'ErrorMessage json)))
+		   (ignore-errors
+		     (cdr (assq 'ErrorMessage
+				(elt (cdr (assq 'ParsedResults json)) 0))))))
 	(setq got-error t)
 	(sleep-for 2))
       (when (and json
@@ -146,7 +149,7 @@
 		 "~/src/kwakk/magscan/" "page.*jpg$"))
     (when (and (not (file-exists-p (file-name-with-extension file "json")))
 	       (> (file-attribute-size (file-attributes file))
-		  (* 5000 1024)))
+		  (* 4500 1024)))
       (message "Resizing for kb %s" file)
       (when (file-exists-p "/tmp/tcor.jpg")
 	(delete-file "/tmp/tcor.jpg"))
@@ -237,7 +240,7 @@
 	    (let ((default-directory sub))
 	      (if (string-match "[.]cbr$" cbr)
 		  (with-environment-variables (("LANG" "C.UTF-8"))
-		    (call-process "unrar" nil nil nil "e" cbr))
+		    (call-process "unrar" nil (get-buffer-create "*rar*") nil "e" cbr))
 		(unless (zerop (call-process "unzip" nil nil nil "-j" cbr))
 		  (call-process "7z" nil nil nil "e" cbr)))
 	      ;; Delete Macos resource files.
@@ -246,6 +249,7 @@
 	      (cl-loop
 	       with i = 0
 	       for file in (let ((case-fold-search t))
+			     ;; \\|[pP][nN][gG]
 			     (directory-files sub t "[.]\\([jJ][pP][eE]?[gG]\\|[wW][eE][bB][pP]\\)\\'"))
 	       for size = (tcor-image-size file)
 	       do
@@ -453,23 +457,49 @@
 	(message "%s" dir)
 	(unless (file-exists-p sub)
 	  (make-directory sub t)
-	  (dolist (file (directory-files dir t "webp\\|jpeg\\|png\\'"))
+	  (dolist (file (directory-files dir t (tcor-case-insensate "webp\\|jpeg\\|png\\|jpg\\'")))
 	    (call-process
 	     "convert" nil nil nil
 	     (file-truename file)
 	     (expand-file-name (format "page-%03d.jpg" (cl-incf i)) sub))))))))
+
+(defun tcor-case-insensate (string)
+  (replace-regexp-in-string
+   "[a-z]"
+   (lambda (char)
+     (format "[%s%s]" char (upcase char)))
+   string))
 
 (defun tcor-magazines ()
   (with-temp-buffer
     (insert-file-contents "~/src/kwakk/magazines.json")
     (json-read)))
 
-(defun tcor-list-missing-issues (mag &optional browse first archive)
+(defun tcor-query-mags (&optional start)
+  (let ((data (tcor-magazines)))
+    (when start
+      (setq data (nthcdr start data)))
+    (cl-loop for mag in data
+	     unless (assq 'complete (cdr mag))
+	     do (tcor-browse-url-firefox
+		 (concat "https://www.scribd.com/search?query=%22"
+			 (string-replace " " "+" (cdr (assq 'name (cdr mag))))
+			 "%22"))
+	     (sleep-for 1))))
+
+(defun tcor-list-missing-issues (mag &optional browse first archive max name)
+  (unless max
+    (setq max most-positive-fixnum))
   (let* ((data (tcor-magazines))
+	 (dfile (format "~/src/kwakk/magscan/%s/double-issues.txt" mag))
+	 (doubles (and (file-exists-p dfile)
+		       (with-temp-buffer
+			 (insert-file-contents dfile)
+			 (split-string (buffer-string)))))
 	 (elem (cdr (assq (intern mag) data))))
     (unless elem
       (user-error "No such mag: %s" mag))
-    (let ((name (cdr (assq 'name elem))))
+    (let ((name (or name (cdr (assq 'name elem)))))
       (pop-to-buffer "*missing*")
       (erase-buffer)
       (let ((issues (directory-files (format "~/src/kwakk/magscan/%s/" mag) nil "[0-9]$")))
@@ -479,16 +509,21 @@
 				      (car (tcor-segment-issue issue mag)))
 				    issues)))
 	  (cl-loop for (group . issues) in groups
+		   while (> max 0)
 		   do (cl-loop with start = 1
 			       for num in (mapcar (lambda (issue)
 						    (cdr (tcor-segment-issue issue mag)))
 						  issues)
+			       while (> max 0)
 			       do (cl-loop for i from start upto (1- num)
 					   for string = (string-clean-whitespace
-							 (format "%s %s %03d" name group i))
-					   when (or (not first)
-						    (> i first))
+							 (format "%S %s %03d" name group i))
+					   while (> max 0)
+					   when (and (or (not first)
+							 (> i first))
+						     (not (member (format "%03d" i) doubles)))
 					   do
+					   (cl-decf max)
 					   (insert string "\n")
 					   (when browse
 					     (when archive
@@ -497,10 +532,10 @@
 					       (when (string-match " 0" string)
 						 (tcor-browse-url-firefox (format "https://archive.org/search?query=%s"
 										  (replace-regexp-in-string " 0+" " " string)))))
-					     (tcor-browse-url-firefox (format "https://annas-archive.org/search?q=%s"
+					     (tcor-browse-url-firefox (format "https://annas-archive.se/search?q=%s"
 									      string))
 					     (when (string-match " 0" string)
-					       (tcor-browse-url-firefox (format "https://annas-archive.org/search?q=%s"
+					       (tcor-browse-url-firefox (format "https://annas-archive.se/search?q=%s"
 										(replace-regexp-in-string " 0+" " " string))))
 					     (sleep-for 5)))
 			       (setq start (1+ num)))))))))
@@ -588,7 +623,7 @@ instead of `browse-url-new-window-flag'."
 	(let ((default-directory (expand-file-name "~/src/kwakk/magscan/")))
 	  (call-process "rsync" nil nil nil
 			"-a" "--delete"
-			"--include=*/" "--include=*.txt" "--exclude=*"
+			"--include=*/" "--include=page*.txt" "--exclude=*"
 			(expand-file-name dir)
 			(concat "/tmp/" mag))
 	  (call-process "rm" nil nil nil
@@ -681,12 +716,13 @@ instead of `browse-url-new-window-flag'."
 (defun tcor-list-all-mags (&optional category)
   (switch-to-buffer "*list*")
   (erase-buffer)
+  (insert "List 30 English language magazines and fanzines focused on discussing comic books, and also list approximately how many issues the magazine published.  Order by number of issues.  Exclude magazines that are predominantly comics magazines -- list only magazines that are about comics instead.  Exclude magazines from this list: ")
   (dolist (mag (with-temp-buffer
 		 (insert-file-contents "~/src/kwakk/magazines.json")
 		 (json-read)))
     (when (or (not category)
 	      (equal category (cdr (assq 'cat (cdr mag)))))
-      (if (memq (car mag) '(MIF MIM MII MIP))
+      (if (memq (car mag) '(MIF MIM MII MIP MIMF))
 	  (dolist (name (cdr (assq 'prefix (cdr mag))))
 	    (insert (cdr name) ", "))
 	(insert (cdr (assq 'name (cdr mag))) ", ")))))
@@ -751,6 +787,14 @@ instead of `browse-url-new-window-flag'."
 	  (setf (gethash (car elem) table) t)))
       (write-region (point-min) (point-max) "/tmp/urls.txt" t))))
 
+(defun tcor-weed-urls (mag)
+  (let ((files (directory-files (format "~/src/kwakk/magscan/%s/" mag))))
+    (while (not (eobp))
+      (if (and (re-search-forward "\\b\\([0-9][0-9][0-9]\\)\\b" (pos-eol) t)
+	       (member (match-string 1) files))
+	  (delete-line)
+	(forward-line 1)))))
+
 (defun tcor-find-empty-directories ()
   (interactive)
   (dolist (mag (directory-files "~/src/kwakk/magscan/" t "[A-Z]"))
@@ -790,8 +834,59 @@ instead of `browse-url-new-window-flag'."
 	  (find-file issue)
 	  (error "Num %s; last %s" (length pages) last))))))
 
+
+;; (dolist (id '(FIGMAR ZONE PAPER KABOOM CISO BCM PX FDC TB MIMF VECU SPLITTER LD LAH FIGMAN EKL CSG BA)) (tcor-insert-blog id))
+(defun tcor-insert-blog (mag)
+  (let* ((mags (with-temp-buffer
+		 (insert-file-contents "~/src/kwakk/magazines.json")
+		 (json-read)))
+	 (data (assq mag mags))
+	 (url (format "https://kwakk.info/%s/"
+		      (downcase (symbol-name mag)))))
+    (let ((browse-url-browser-function browse-url-secondary-browser-function))
+      (browse-url url))
+    (ewp-import-screenshot 4)
+    (insert (format "<a href=\"%s\">%s</a>\n\n\n"
+		    url
+		    (cdr (assq 'name data))))))
+
+(defun tcor-crop ()
+  (ignore-errors (make-directory "c"))
+  (dolist (page (directory-files "." nil "page.*jpg"))
+    (let ((size (tcor-image-size page)))
+      (call-process "convert" nil (get-buffer-create "*crop*") nil
+		    "+repage" "-crop"
+		    (format "%dx%d+%d+%d"
+			    ;;(car size)
+			    ;;4880
+			    ;;4900
+			    ;;(- 2830 96)
+			    1660
+			    2550
+			    
+			    ;;512
+			    ;;1026
+			    200
+			    200
+			    )
+		    page (concat "c/" page)))))
+
+(defun tcor-query-libgen ()
+  (while (re-search-forward "^ +\\(.*\\) - \\(Approx\\|Over\\)" nil t)
+    (tcor-browse-url-firefox
+     (concat "https://annas-archive.org/search?index=&page=1&q=" (match-string 1) "&display=&content=book_comic&sort=")
+     ;; (concat "https://libgen.li/index.php?req=" (match-string 1) "&columns%5B%5D=s&objects%5B%5D=f&objects%5B%5D=e&objects%5B%5D=s&topics%5B%5D=l&topics%5B%5D=c&topics%5B%5D=f&topics%5B%5D=m&res=100&showch=on&gmode=on&filesuns=all")
+     )
+    (sleep-for 2)))
+
 (provide 'tcor)
 
-;; List 20 Italian-language magazines and fanzines about comic books (but exclude comic book magazines as well as online magazines).
+;; List the 60 magazines and fanzines discussing comic books (but exclude comic book magazines as well as online magazines) that have the most issues, and also list approximately how many issues the magazine published.  Order by number of issues.  Do not include magazines in English, Spanish, French, Italian, German, Dutch, Japanese or Korean.
+
+;; List 30 English language magazines and fanzines focused on discussing comic books, and also list approximately how many issues the magazine published.  Order by number of issues.  Exclude magazines that are predominantly comics magazines -- list only magazines that are about comics instead.  Exclude magazines from this list: 
+
+;; List magazines and fanzines about comic books in any language, and also list approximately how many issues the magazine published.  Order by number of issues.  Exclude magazines that are predominantly comics magazines -- list only magazines that are about comics instead.  Exclude all magazines from the following list: 
+
+;; List 30 Argentinian magazines and fanzines focused on discussing comic books, and also list approximately how many issues the magazine published.  Order by number of issues.  Exclude magazines that are predominantly comics magazines -- list only magazines that are about comics instead. 
 
 ;;; tcor.el ends here
