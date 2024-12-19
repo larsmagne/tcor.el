@@ -192,7 +192,7 @@
 
 (defun tcor-import-files (mag &optional prefix)
   (tcor-import-file mag prefix
-		    (directory-files "." t "jp2.*zip\\|[.]cb[rz]$\\|pdf$")))
+		    (directory-files "." t "jp2.*zip\\|[.]cb[rz7]$\\|pdf$\\|rar$")))
 
 (defun tcor-import-file (mag &optional prefix files)
   (dolist (file (tcor-sort-by-size (or files (dired-get-marked-files nil current-prefix-arg))))
@@ -200,7 +200,7 @@
 	     (cond
 	      ((string-match "pdf$" file)
 	       (tcor-unpack-pdf (list file) mag prefix))
-	      ((string-match "[.]cb[rz]$" file)
+	      ((string-match "[.]cb[rz7]$\\|[.]rar$\\|[.]zip$" file)
 	       (tcor-unpack-cbr (list file) mag prefix))
 	      ((string-match "jp2.*zip" file)
 	       (tcor-unpack-jp2 (list file) mag prefix))
@@ -217,7 +217,7 @@
   (dolist (file (tcor-sort-by-size
 		 (directory-files default-directory
 				  t
-				  "[.]cb[zr]$\\|[.]pdf$\\|jp2.*[.]zip$")))
+				  "[.]cb[zr7]$\\|[.]pdf$\\|jp2.*[.]zip$")))
     (tcor-import-file mag prefix (list file))))
 
 (defun tcor-issue-match (mag)
@@ -225,20 +225,33 @@
       "\\b[0-9][0-9][0-9][0-9]\\b"
     "\\b[0-9][0-9][0-9]\\b"))
 
+(defvar tcor-override-issue nil)
+
+(defun tcor-issue (mag file)
+  (or tcor-override-issue
+      (and (string-match (tcor-issue-match mag) file)
+	   (match-string 0 file))))
+
+(defun tcor-file-exists-p (dir)
+  (let ((exists (file-exists-p dir)))
+    (unless exists
+      (make-directory dir t))
+    (when (directory-empty-p dir)
+      (setq exists nil))
+    exists))
+
 (defun tcor-unpack-cbr (dir mag &optional prefix)
   (let ((subs nil))
     (dolist (cbr (tcor-sort-by-size (if (consp dir)
 					dir
-				      (directory-files dir t "[.]cb[zr]$"))))
-      (when (string-match (tcor-issue-match mag) cbr)
+				      (directory-files dir t "[.]cb[zr7]$"))))
+      (when-let ((issue (tcor-issue mag cbr)))
 	(message "%s" cbr)
-	(let* ((issue (match-string 0 cbr))
-	       (sub (expand-file-name (concat (or prefix "") issue)
+	(let* ((sub (expand-file-name (concat (or prefix "") issue)
 				      (format "~/src/kwakk/magscan/%s/" mag))))
-	  (unless (file-exists-p sub)
-	    (make-directory sub t)
+	  (unless (tcor-file-exists-p sub)
 	    (let ((default-directory sub))
-	      (if (string-match "[.]cbr$" cbr)
+	      (if (string-match "[.]cbr$\\|[.]rar$" cbr)
 		  (with-environment-variables (("LANG" "C.UTF-8"))
 		    (call-process "unrar" nil (get-buffer-create "*rar*") nil "e" cbr))
 		(unless (zerop (call-process "unzip" nil nil nil "-j" cbr))
@@ -249,8 +262,8 @@
 	      (cl-loop
 	       with i = 0
 	       for file in (let ((case-fold-search t))
-			     ;; \\|[pP][nN][gG]
-			     (directory-files sub t "[.]\\([jJ][pP][eE]?[gG]\\|[wW][eE][bB][pP]\\)\\'"))
+			     ;; 
+			     (directory-files sub t "[.]\\([jJ][pP][eE]?[gG]\\|[wW][eE][bB][pP]\\|[pP][nN][gG]\\)\\'"))
 	       for size = (tcor-image-size file)
 	       do
 	       (call-process "chmod" nil nil nil "u+rw" file)
@@ -290,15 +303,14 @@
     subs))
 
 (defun tcor-unpack-cbr-unnumered (dir)
-  (cl-loop for cbr in (directory-files dir t "[.]cb[zr]$")
+  (cl-loop for cbr in (directory-files dir t "[.]cb[zr7]$")
 	   for issue from 1
 	   do
 	   (progn
 	     (message "%s" cbr)
 	     (let* ((sub (expand-file-name (format "WS%03d" issue)
 					   "~/src/kwakk/magscan/W/")))
-	       (unless (file-exists-p sub)
-		 (make-directory sub)
+	       (unless (tcor-file-exists-p sub)
 		 (let ((default-directory sub))
 		   (if (string-match "[.]cbr$" cbr)
 		       (call-process "unrar" nil nil nil "e" cbr)
@@ -336,13 +348,11 @@
     (dolist (zip (if (consp dir)
 		     dir
 		   (directory-files dir t "[.]zip$")))
-      (when (string-match (tcor-issue-match mag) zip)
+      (when-let ((issue (tcor-issue mag zip)))
 	(message "%s" zip)
-	(let* ((issue (match-string 0 zip))
-	       (sub (expand-file-name (concat (or prefix "") issue)
-				      (format "~/src/kwakk/magscan/%s/" mag))))
-	  (unless (file-exists-p sub)
-	    (make-directory sub t)
+	(let ((sub (expand-file-name (concat (or prefix "") issue)
+				     (format "~/src/kwakk/magscan/%s/" mag))))
+	  (unless (tcor-file-exists-p sub)
 	    (let ((default-directory sub))
 	      (call-process "unzip" nil nil nil "-j" zip)
 	      ;; Delete Macos resource files.
@@ -393,13 +403,11 @@
     (dolist (pdf (if (consp dir)
 		     dir
 		   (directory-files dir t "[.]pdf$")))
-      (when (string-match (tcor-issue-match mag) pdf)
-	(let* ((issue (match-string 0 pdf))
-	       (sub (expand-file-name (concat (or prefix "") issue)
+      (when-let ((issue (tcor-issue mag pdf)))
+	(let ((sub (expand-file-name (concat (or prefix "") issue)
 				      (format "~/src/kwakk/magscan/%s/" mag))))
 	  (message "%s" pdf)
-	  (unless (file-exists-p sub)
-	    (make-directory sub t)
+	  (unless (tcor-file-exists-p sub)
 	    (let ((default-directory sub))
 	      (call-process "pdftoppm" nil nil nil
 			    "-jpeg"
@@ -449,14 +457,12 @@
   (dolist (dir (if (consp dir)
 		   dir
 		 (directory-files dir t "[0-9]")))
-    (when (string-match (tcor-issue-match mag) dir)
-      (let* ((issue (match-string 0 dir))
-	     (sub (expand-file-name (concat (or prefix "") issue)
+    (when-let ((issue (tcor-issue mag dir)))
+      (let* ((sub (expand-file-name (concat (or prefix "") issue)
 				    (format "~/src/kwakk/magscan/%s/" mag)))
 	     (i 0))
 	(message "%s" dir)
-	(unless (file-exists-p sub)
-	  (make-directory sub t)
+	(unless (tcor-file-exists-p sub)
 	  (dolist (file (directory-files dir t (tcor-case-insensate "webp\\|jpeg\\|png\\|jpg\\'")))
 	    (call-process
 	     "convert" nil nil nil
@@ -745,6 +751,8 @@ instead of `browse-url-new-window-flag'."
 
 
 (defun tcor-do ()
+  ;; Check that the mags file is valid.
+  (tcor-magazines)
   (tcor-pre-ocr)
   (call-process "~/src/tcor.el/orc-shard")
   ;; Loop while there's errors.
@@ -857,17 +865,17 @@ instead of `browse-url-new-window-flag'."
       (call-process "convert" nil (get-buffer-create "*crop*") nil
 		    "+repage" "-crop"
 		    (format "%dx%d+%d+%d"
+			    3000 3900
+			    0 400
 			    ;;(car size)
 			    ;;4880
 			    ;;4900
 			    ;;(- 2830 96)
-			    1660
-			    2550
+			    ;;1660 2550
 			    
 			    ;;512
 			    ;;1026
-			    200
-			    200
+			    ;;200 200
 			    )
 		    page (concat "c/" page)))))
 
@@ -878,6 +886,24 @@ instead of `browse-url-new-window-flag'."
      ;; (concat "https://libgen.li/index.php?req=" (match-string 1) "&columns%5B%5D=s&objects%5B%5D=f&objects%5B%5D=e&objects%5B%5D=s&topics%5B%5D=l&topics%5B%5D=c&topics%5B%5D=f&topics%5B%5D=m&res=100&showch=on&gmode=on&filesuns=all")
      )
     (sleep-for 2)))
+
+(defvar tcor-misc-counter 75)
+
+(defun tcor-add-misc (name)
+  (interactive (list (buffer-substring-no-properties (mark) (point))))
+  (let ((prefix (format "C%d-" (cl-incf tcor-misc-counter))))
+    (save-window-excursion
+      (find-file "~/src/kwakk/magazines.json")
+      (goto-char (point-min))
+      (search-forward "\"MICS\":")
+      (search-forward "}")
+      (beginning-of-line)
+      (insert (format "      %S: %S,\n" prefix name)))
+    (let* ((tcor-override-issue "001")
+	   (files (dired-get-marked-files nil current-prefix-arg))
+	   (tcor-inhibit-split (or nil (string-match "pdf\\'" (car files)))))
+      (tcor-import-file "MICS" prefix files)
+      (rename-file (car files) "/var/cx/mics/"))))
 
 (provide 'tcor)
 
