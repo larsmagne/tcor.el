@@ -23,11 +23,12 @@
 
 (require 'json)
 (require 'mm-url)
+(require 'vtable)
 
 (defvar tcor-api-key nil)
 (defvar tcor-inhibit-split nil)
 
-(defun tcor-upload (file &optional no-process language)
+(defun tcor-upload (file &optional no-process _language)
   (let* ((url-request-method "POST")
 	 (boundary "--14--")
 	 (url-request-extra-headers
@@ -195,15 +196,16 @@
 		    (directory-files "." t "jp2.*zip\\|[.]cb[rz7]$\\|pdf$\\|rar$")))
 
 (defun tcor-import-file (mag &optional prefix files)
+  (delete-other-windows)
   (dolist (file (tcor-sort-by-size (or files (dired-get-marked-files nil current-prefix-arg))))
     (dolist (dir
 	     (cond
 	      ((string-match "pdf$" file)
 	       (tcor-unpack-pdf (list file) mag prefix))
-	      ((string-match "[.]cb[rz7]$\\|[.]rar$\\|[.]zip$" file)
-	       (tcor-unpack-cbr (list file) mag prefix))
 	      ((string-match "jp2.*zip" file)
 	       (tcor-unpack-jp2 (list file) mag prefix))
+	      ((string-match "[.]cb[rz7]$\\|[.]rar$\\|[.]zip$" file)
+	       (tcor-unpack-cbr (list file) mag prefix))
 	      ((file-directory-p file)
 	       (tcor-unpack-directories (list file) mag prefix))))
       (when (file-exists-p dir)
@@ -514,37 +516,46 @@
 	(let ((groups (seq-group-by (lambda (issue)
 				      (car (tcor-segment-issue issue mag)))
 				    issues)))
-	  (cl-loop for (group . issues) in groups
-		   while (> max 0)
-		   do (cl-loop with start = 1
-			       for num in (mapcar (lambda (issue)
-						    (cdr (tcor-segment-issue issue mag)))
-						  issues)
-			       while (> max 0)
-			       do (cl-loop for i from start upto (1- num)
-					   for string = (string-clean-whitespace
-							 (format "%S %s %03d" name group i))
-					   while (> max 0)
-					   when (and (or (not first)
-							 (> i first))
-						     (not (member (format "%03d" i) doubles)))
-					   do
-					   (cl-decf max)
-					   (insert string "\n")
-					   (when browse
-					     (when archive
-					       (tcor-browse-url-firefox (format "https://archive.org/search?query=%s"
-										string))
-					       (when (string-match " 0" string)
-						 (tcor-browse-url-firefox (format "https://archive.org/search?query=%s"
-										  (replace-regexp-in-string " 0+" " " string)))))
-					     (tcor-browse-url-firefox (format "https://annas-archive.se/search?q=%s"
-									      string))
-					     (when (string-match " 0" string)
-					       (tcor-browse-url-firefox (format "https://annas-archive.se/search?q=%s"
-										(replace-regexp-in-string " 0+" " " string))))
-					     (sleep-for 5)))
-			       (setq start (1+ num)))))))))
+	  (open-webs
+	   (cl-loop for (group . issues) in groups
+		    while (> max 0)
+		    append
+		    (cl-loop with start = 1
+			     for num in (mapcar (lambda (issue)
+						  (cdr (tcor-segment-issue issue mag)))
+						issues)
+			     while (> max 0)
+			     append
+			     (cl-loop for i from start upto (1- num)
+				      for string = (string-clean-whitespace
+						    (format "%S %s %03d" name group i))
+				      while (> max 0)
+				      when (and (or (not first)
+						    (> i first))
+						(not (member (format "%03d" i) doubles)))
+				      append
+				      (progn
+					(cl-decf max)
+					(insert string "\n")
+					(let ((urls nil))
+					  (when browse
+					    (when archive
+					      (push (format "https://archive.org/search?query=%s" string) urls)
+					      (when (string-match " 0" string)
+						(push (format "https://archive.org/search?query=%s"
+							      (replace-regexp-in-string " 0+" " " string))
+						      urls)))
+					    (push (format "https://annas-archive.se/search?q=%s" string) urls)
+					    (when (string-match " 00" string)
+					      (push (format "https://annas-archive.se/search?q=%s"
+							    (replace-regexp-in-string " 00" " 0" string))
+						    urls))
+					    (when (string-match " 0" string)
+					      (push (format "https://annas-archive.se/search?q=%s"
+							    (replace-regexp-in-string " 0+" " " string))
+						    urls)))
+					  (nreverse urls))))
+			     do (setq start (1+ num))))))))))
 
 (defun tcor-browse-url-firefox (url &optional new-window)
   "Ask the Firefox WWW browser to load URL.
@@ -722,16 +733,21 @@ instead of `browse-url-new-window-flag'."
 (defun tcor-list-all-mags (&optional category)
   (switch-to-buffer "*list*")
   (erase-buffer)
-  (insert "List 30 English language magazines and fanzines focused on discussing comic books, and also list approximately how many issues the magazine published.  Order by number of issues.  Exclude magazines that are predominantly comics magazines -- list only magazines that are about comics instead.  Exclude magazines from this list: ")
-  (dolist (mag (with-temp-buffer
-		 (insert-file-contents "~/src/kwakk/magazines.json")
-		 (json-read)))
-    (when (or (not category)
-	      (equal category (cdr (assq 'cat (cdr mag)))))
-      (if (memq (car mag) '(MIF MIM MII MIP MIMF))
-	  (dolist (name (cdr (assq 'prefix (cdr mag))))
-	    (insert (cdr name) ", "))
-	(insert (cdr (assq 'name (cdr mag))) ", ")))))
+  (insert "List 30 English language magazines and fanzines focused on discussing comic books, and also list approximately how many issues the magazine published.  Order by number of issues, descending.  Exclude magazines that are predominantly comics magazines -- list only magazines that are about comics instead.  Prioritize magazines with long runs.  Exclude magazines from this list: ")
+  (let ((titles (tcor-known-titles)))
+    (dolist (mag (with-temp-buffer
+		   (insert-file-contents "~/src/kwakk/magazines.json")
+		   (json-read)))
+      (when (or (not category)
+		(equal category (cdr (assq 'cat (cdr mag)))))
+	(if (assq 'misc (cdr mag))
+	    (dolist (name (cdr (assq 'prefix (cdr mag))))
+	      (unless (member (cdr name) titles)
+		(insert (cdr name) ", ")))
+	  (unless (member (cdr (assq 'name (cdr mag))) titles)
+	    (insert (cdr (assq 'name (cdr mag))) ", ")))))
+    (dolist (title titles)
+      (insert title ", "))))
 
 (defun tcor-link-all-mags ()
   (switch-to-buffer "*list*")
@@ -862,6 +878,7 @@ instead of `browse-url-new-window-flag'."
   (ignore-errors (make-directory "c"))
   (dolist (page (directory-files "." nil "page.*jpg"))
     (let ((size (tcor-image-size page)))
+      (ignore size)
       (call-process "convert" nil (get-buffer-create "*crop*") nil
 		    "+repage" "-crop"
 		    (format "%dx%d+%d+%d"
@@ -904,6 +921,154 @@ instead of `browse-url-new-window-flag'."
 	   (tcor-inhibit-split (or nil (string-match "pdf\\'" (car files)))))
       (tcor-import-file "MICS" prefix files)
       (rename-file (car files) "/var/cx/mics/"))))
+
+(defun tcor-find-mags-with-few-issues ()
+  (pop-to-buffer "*mags*")
+  (erase-buffer)
+  (dolist (mag (tcor-magazines))
+    (when (< (length (directory-files (expand-file-name (symbol-name (car mag)) "~/src/kwakk/magscan/")))
+	     10)
+      (insert (symbol-name (car mag)) " " (cdr (assq 'name (cdr mag))) "\n"))))
+
+(defun tcor-html (url)
+  (with-current-buffer (url-retrieve-synchronously url)
+    (goto-char (point-min))
+    (search-forward "\n\n")
+    (prog1
+	(libxml-parse-html-region (point) (point-max))
+      (kill-buffer (current-buffer)))))
+
+(defun tcor-download (url file)
+  (call-process "curl" nil nil nil
+		"--output" file url))
+
+(defun tcor-sane ()
+  (cl-loop for link in (dom-by-tag (tcor-html "https://digitalcommons.unl.edu/sane/all_issues.html") 'a)
+	   for url = (dom-attr link 'href)
+	   when (and url (string-match "/iss[0-9]+/" url))
+	   do
+	   (let ((dir (and (string-match "/vol.*" url)
+			   (concat "/tmp/sane/" (string-replace "/" "-" (match-string 0 url)))))
+		 html)
+	     (unless (file-exists-p dir)
+	       (make-directory dir t)
+	       (setq html (tcor-html url))
+	       (tcor-download (cl-loop for img in (nreverse (dom-by-tag html 'img))
+				       for src = (dom-attr img 'src)
+				       when (and src (string-match "assets/md5images" src))
+				       return (shr-expand-url src url))
+			      (expand-file-name "cover.gif" dir))
+	       (cl-loop with part = 0
+			for page in (dom-by-tag html 'a)
+			for pdf = (dom-attr page 'href)
+			;; https://digitalcommons.unl.edu/cgi/viewcontent.cgi?article=1055&context=sane
+			when (and pdf (string-match "/cgi/viewcontent.cgi" pdf))
+			do (tcor-download pdf (expand-file-name (format "%02d.pdf" (cl-incf part)) dir)))))))
+
+(defun tcor-known-titles ()
+  (let ((titles nil))
+    (with-temp-buffer
+      (insert-file-contents "~/src/kwakk/known-magazines.txt")
+      (while (re-search-forward "^[0-9]+) \\(.*\\)" nil t)
+	(push (string-trim (match-string 1)) titles)))
+    titles))
+
+(defvar-keymap tcor-list-mode-map
+  "s" #'tcor-list-search)
+
+(define-derived-mode tcor-list-mode special-mode "TCOR")
+
+(defun tcor-list ()
+  (interactive)
+  (switch-to-buffer "*list*")
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (tcor-list-mode)
+    (make-vtable
+     :columns '((:name "Complete")
+		(:name "Type")
+		(:name "Language")
+		(:name "Name"))
+     :objects (tcor-magazines)
+     :getter
+     (lambda (mag column vtable)
+       (pcase (vtable-column vtable column)
+	 ("Complete" (if (assq 'complete (cdr mag)) "*" ""))
+	 ("Type" (cdr (assq 'cat (cdr mag))))
+	 ("Language" (or (cdr (assq 'lang (cdr mag))) ""))
+	 ("Name" (cdr (assq 'name (cdr mag)))))))))
+
+(defun tcor-list-search ()
+  (interactive)
+  (let* ((mag (vtable-current-object))
+	 (name (cdr (assq 'name (cdr mag))))
+	 (url (format "https://annas-archive.org/search?q=%s"
+		      (browse-url-encode-url (concat "\"" name "\""))))
+	 (results nil)
+	 (first t)
+	 func dom urls)
+    (setq urls (list url))
+    
+    (setq func
+	  (lambda (url)
+	    (url-retrieve
+	     url
+	     (lambda (&rest _)
+	       (goto-char (point-min))
+	       (search-forward "\n\n")
+	       (setq dom (libxml-parse-html-region (point) (point-max)))
+	       (setq d dom)
+	       (kill-buffer (current-buffer))
+	       (cl-loop for comment in (dom-by-tag dom 'comment)
+			for text = (dom-text comment)
+			when (and text (string-match "<h3 " text))
+			do (dom-append-child dom
+					     (with-temp-buffer
+					       (insert text)
+					       (libxml-parse-html-region (point-min) (point-max)))))
+	       (setq results
+		     (nconc results
+			    (cl-loop for entry in (dom-by-tag dom 'h3)
+				     for siblings = (dom-non-text-children (dom-parent dom entry))
+				     collect (list :name (dom-text entry)
+						   :spec (dom-text (cadr (memq entry (reverse siblings))))
+						   :publisher (dom-text (cadr (memq entry siblings)))))))
+
+	       (if first
+		   (setq urls
+			 (cl-loop for link in (dom-by-tag dom 'a)
+				  for href = (dom-attr link 'href)
+				  when (and href
+					    (string-match "&page=\\([0-9]+\\)" href)
+					    (not (equal (match-string 1 href) "1")))
+				  collect (shr-expand-url href "https://annas-archive.org/"))
+			 first nil)
+		 (pop urls))
+	       (if (not urls)
+		   (tcor-list-results results) 
+		 (run-at-time 2 nil func (car urls)))))))
+    (funcall func (car urls))))
+
+(defun tcor-list-results (results)
+  (setq er results)
+  (switch-to-buffer "*results*")
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (setq truncate-lines t)
+    (make-vtable
+     :columns '((:name "Name" :width 40)
+		(:name "Publisher" :width 20)
+		(:name "Spec"))
+     :objects results
+     :getter
+     (lambda (res column vtable)
+       (pcase (vtable-column vtable column)
+	 ("Name" (plist-get res :name))
+	 ("Publisher" (plist-get res :publisher))
+	 ("Spec" (replace-regexp-in-string "\\`[^,]*,[^,]*,[^,]*,[^,]*," ""
+					   (plist-get res :spec))))))
+    nil))
+
 
 (provide 'tcor)
 
