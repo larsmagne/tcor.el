@@ -1018,7 +1018,6 @@ instead of `browse-url-new-window-flag'."
     
     (setq func
 	  (lambda (url)
-	    (message "Fetching %s" url)
 	    (url-retrieve
 	     url
 	     (lambda (&rest _)
@@ -1089,28 +1088,50 @@ instead of `browse-url-new-window-flag'."
 (defvar-keymap tcor-list-results-mode-map
   "RET" #'tcor-anna-archive)
 
-(defun tcor-anna-archive ()
-  (interactive)
+(defun tcor-anna-archive (&optional pop)
+  (interactive "P")
   (let ((result (vtable-current-object)))
-    (open-web-new-window (shr-expand-url (plist-get result :link) "https://annas-archive.org/"))))
+    (funcall (if pop #'open-web-new-window #'open-web-same-window)
+	     (shr-expand-url (plist-get result :link) "https://annas-archive.org/"))))
 
 (define-derived-mode tcor-list-results-mode special-mode "TCOR")
 
 (defun tcor-filter-results (results mag)
   (let ((missing (tcor-missing-issues mag)))
-    (cl-loop for elem in results
-	     for match = (tcor-match-p (plist-get elem :name) missing)
-	     when match
-	     collect (append elem (list :match match)))))
+    (tcor-sort-results
+     (cl-loop for elem in results
+	      for match = (tcor-match-p (plist-get elem :name) missing)
+	      when match
+	      collect (append elem (list :match match)))
+     missing)))
+
+(defun tcor-sort-results (results missing)
+  (sort results
+	(lambda (r1 r2)
+	  (< (tcor-result-rank r1 missing)
+	     (tcor-result-rank r2 missing)))))
+
+(defun tcor-result-rank (result missing)
+  (or
+   (cl-loop for i from 0
+	    for number in (tcor-numberify-name (plist-get result :name))
+	    when (memq number missing)
+	    return i)
+   most-positive-fixnum))
 
 (defun tcor-match-p (name missing)
-  (cl-loop for (g . m) in (reverse missing)
-	   when (string-match (format "\\(\\`\\|[^0-9]\\)\\(%s\\)\\(\\'\\|[^0-9]\\)" 
-				      (string-join (cl-loop for i from 0 upto 5
-							    collect (format (format "%%0%dd" i) m))
-						   "\\|"))
-			      name)
-	   return (format "%s%s%s" g (if (equal g "") "" " ") m)))
+  ;; Filter out common false matches.
+  (setq name (replace-regexp-in-string "\\bc2c\\b" "" name))
+  (let ((numbers (tcor-numberify-name name)))
+    (cl-loop for (g . m) in (reverse missing)
+	     when (member m numbers)
+	     return (format "%s%s%s" g (if (equal g "") "" " ") m))))
+
+(defun tcor-numberify-name (name)
+  (cl-loop with start = 0
+	   while (string-match "[0-9]+" name start)
+	   collect (string-to-number (match-string 0 name))
+	   do (setq start (match-end 0))))
 
 (defun tcor-missing-issues (mag)
   (let* ((data (tcor-magazines))
