@@ -731,7 +731,7 @@ instead of `browse-url-new-window-flag'."
 	      (cl-decf i)))))))))
 
 (defun tcor-list-all-mags (&optional category)
-  (switch-to-buffer "*list*")
+  (switch-to-buffer "*all list*")
   (erase-buffer)
   (insert "List 30 English language magazines and fanzines focused on discussing comic books, and also list approximately how many issues the magazine published.  Order by number of issues, descending.  Exclude magazines that are predominantly comics magazines -- list only magazines that are about comics instead.  Prioritize magazines with long runs.  Exclude magazines from this list: ")
   (let ((titles (tcor-known-titles)))
@@ -1149,6 +1149,7 @@ instead of `browse-url-new-window-flag'."
 	   do (setq start (match-end 0))))
 
 (defun tcor-missing-issues (elem &optional add-extra)
+  ;;(setq add-extra nil)
   (let* ((data (tcor-magazines))
 	 (parent (cdr (assq 'parent (cdr elem))))
 	 (code (or parent (car elem)))
