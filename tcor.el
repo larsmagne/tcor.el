@@ -1181,7 +1181,8 @@ instead of `browse-url-new-window-flag'."
       (cl-loop for (group . gissues) in groups
 	       append
 	       (cl-loop with last = (cdr (tcor-segment-issue (car (last gissues)) code))
-			for i from 1 upto (if (and add-extra (equal group ""))
+			for i from 1 upto (if (and add-extra
+						   (or (equal group "") parent))
 					      (+ last 100)
 					    last)
 			for em = (format (format "%%s%%0%dd" digits) group i)
