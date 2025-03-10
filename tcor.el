@@ -988,18 +988,35 @@ instead of `browse-url-new-window-flag'."
     (make-vtable
      :columns '((:name "ID")
 		(:name "Complete")
+		(:name "Missing")
 		(:name "Type")
 		(:name "Language")
 		(:name "Name"))
-     :objects (tcor-magazines)
+     :objects (tcor-extend-magazines (tcor-magazines))
      :getter
      (lambda (mag column vtable)
        (pcase (vtable-column vtable column)
 	 ("ID" (symbol-name (car mag)))
 	 ("Complete" (if (assq 'complete (cdr mag)) "*" ""))
+	 ("Missing" (length (tcor-missing-issues mag)))
 	 ("Type" (cdr (assq 'cat (cdr mag))))
 	 ("Language" (or (cdr (assq 'lang (cdr mag))) ""))
 	 ("Name" (cdr (assq 'name (cdr mag)))))))))
+
+(defun tcor-extend-magazines (magazines)
+  (cl-loop for mag in magazines
+	   if (assq 'misc (cdr mag))
+	   append (tcor-misc-magazines mag)
+	   else
+	   collect mag))
+
+(defun tcor-misc-magazines (mag)
+  (cl-loop for (code . name) in (cdr (assq 'prefix (cdr mag)))
+	   collect `(,code
+		     (name . ,name)
+		     (cat . ,(cdr (assq 'cat (cdr mag))))
+		     (lang . ,(cdr (assq 'lang (cdr mag))))
+		     (parent . ,(car mag)))))
 
 (defun tcor-list-search-with-name (name)
   (interactive "sSearch with name: ")
@@ -1010,7 +1027,7 @@ instead of `browse-url-new-window-flag'."
   (let* ((mag (vtable-current-object))
 	 (name (or name (cdr (assq 'name (cdr mag)))))
 	 (url (format "https://annas-archive.org/search?q=%s"
-		      (browse-url-encode-url (concat "\"" name "\""))))
+		      (replace-regexp-in-string "&" "%26" (browse-url-encode-url (concat "\"" name "\"")))))
 	 (results nil)
 	 (first t)
 	 func dom urls)
@@ -1057,33 +1074,34 @@ instead of `browse-url-new-window-flag'."
 			 first nil)
 		 (pop urls))
 	       (if (not urls)
-		   (tcor-list-results results (car mag))
+		   (tcor-list-results results mag)
 		 (run-at-time 2 nil func (car urls)))))))
     (funcall func (car urls))))
 
 (defun tcor-list-results (results mag)
-  (switch-to-buffer "*results*")
-  (let ((inhibit-read-only t)
-	(objs (tcor-filter-results results mag)))
-    (erase-buffer)
-    (setq truncate-lines t)
-    (tcor-list-results-mode)
-    (when objs
-      (make-vtable
-       :columns '((:name "Match")
-		  (:name "Name" :width 40)
-		  (:name "Publisher" :width 20)
-		  (:name "Spec"))
-       :objects objs
-       :getter
-       (lambda (res column vtable)
-	 (pcase (vtable-column vtable column)
-	   ("Match" (plist-get res :match))
-	   ("Name" (plist-get res :name))
-	   ("Publisher" (plist-get res :publisher))
-	   ("Spec" (replace-regexp-in-string "\\`[^,]*,[^,]*,[^,]*,[^,]*," ""
-					     (plist-get res :spec))))))
-      nil)))
+  (let ((objs (tcor-filter-results results mag)))
+    (if (not objs)
+	(message "No missing issues found")
+      (switch-to-buffer "*results*")
+      (let ((inhibit-read-only t))
+	(erase-buffer)
+	(setq truncate-lines t)
+	(tcor-list-results-mode)
+	(when objs
+	  (make-vtable
+	   :columns '((:name "Match")
+		      (:name "Name" :width 40)
+		      (:name "Publisher" :width 20)
+		      (:name "Spec"))
+	   :objects objs
+	   :getter
+	   (lambda (res column vtable)
+	     (pcase (vtable-column vtable column)
+	       ("Match" (plist-get res :match))
+	       ("Name" (plist-get res :name))
+	       ("Publisher" (plist-get res :publisher))
+	       ("Spec" (replace-regexp-in-string "\\`[^,]*,[^,]*,[^,]*,[^,]*," ""
+						 (plist-get res :spec)))))))))))
 
 (defvar-keymap tcor-list-results-mode-map
   "RET" #'tcor-anna-archive)
@@ -1097,12 +1115,13 @@ instead of `browse-url-new-window-flag'."
 (define-derived-mode tcor-list-results-mode special-mode "TCOR")
 
 (defun tcor-filter-results (results mag)
-  (let ((missing (tcor-missing-issues mag)))
+  (let ((missing (tcor-missing-issues mag t)))
     (tcor-sort-results
      (cl-loop for elem in results
 	      for match = (tcor-match-p (plist-get elem :name) missing)
 	      when match
-	      collect (append elem (list :match match)))
+	      collect (append elem (list :match (cdr match)
+					 :number (car match))))
      missing)))
 
 (defun tcor-sort-results (results missing)
@@ -1112,12 +1131,8 @@ instead of `browse-url-new-window-flag'."
 	     (tcor-result-rank r2 missing)))))
 
 (defun tcor-result-rank (result missing)
-  (or
-   (cl-loop for i from 0
-	    for number in (tcor-numberify-name (plist-get result :name))
-	    when (memq number missing)
-	    return i)
-   most-positive-fixnum))
+  (seq-position (tcor-numberify-name (plist-get result :name))
+		(plist-get result :number)))
 
 (defun tcor-match-p (name missing)
   ;; Filter out common false matches.
@@ -1125,7 +1140,7 @@ instead of `browse-url-new-window-flag'."
   (let ((numbers (tcor-numberify-name name)))
     (cl-loop for (g . m) in (reverse missing)
 	     when (member m numbers)
-	     return (format "%s%s%s" g (if (equal g "") "" " ") m))))
+	     return (cons m (format "%s%s%s" g (if (equal g "") "" " ") m)))))
 
 (defun tcor-numberify-name (name)
   (cl-loop with start = 0
@@ -1133,18 +1148,23 @@ instead of `browse-url-new-window-flag'."
 	   collect (string-to-number (match-string 0 name))
 	   do (setq start (match-end 0))))
 
-(defun tcor-missing-issues (mag)
+(defun tcor-missing-issues (elem &optional add-extra)
   (let* ((data (tcor-magazines))
-	 (dfile (format "~/src/kwakk/magscan/%s/double-issues.txt" mag))
+	 (parent (cdr (assq 'parent (cdr elem))))
+	 (code (or parent (car elem)))
+	 (dfile (format "~/src/kwakk/magscan/%s/double-issues.txt" code))
 	 (doubles (and (file-exists-p dfile)
 		       (with-temp-buffer
 			 (insert-file-contents dfile)
 			 (split-string (buffer-string)))))
-	 (elem (cdr (assq mag data)))
-	 (digits (if (member mag '(CBG CSN))
+	 (digits (if (member code '(CBG CSN))
 		     4
 		   3))
-	 (issues (directory-files (format "~/src/kwakk/magscan/%s/" mag) nil "[0-9]$"))
+	 (issues (directory-files
+		  (format "~/src/kwakk/magscan/%s/" code) nil
+		  (if parent
+		      (format "\\`%s[0-9]+\\'" (car elem))
+		    "[0-9]\\'")))
 	 (highest (string-to-number
 		   (or
 		    (car (last (seq-filter (lambda (e)
@@ -1155,11 +1175,14 @@ instead of `browse-url-new-window-flag'."
       (setq issues (nconc issues (cl-loop for i from (1+ highest) upto last
 					  collect (format (format "%%0%dd" digits) i)))))
     (let ((groups (seq-group-by (lambda (issue)
-				  (car (tcor-segment-issue issue mag)))
+				  (car (tcor-segment-issue issue code)))
 				issues)))
       (cl-loop for (group . gissues) in groups
 	       append
-	       (cl-loop for i from 1 upto (cdr (tcor-segment-issue (car (last gissues)) mag))
+	       (cl-loop with last = (cdr (tcor-segment-issue (car (last gissues)) code))
+			for i from 1 upto (if (and add-extra (equal group ""))
+					      (+ last 100)
+					    last)
 			for em = (format (format "%%s%%0%dd" digits) group i)
 			unless (or (member em doubles)
 				   (member em issues))
