@@ -223,7 +223,7 @@
     (tcor-import-file mag prefix (list file))))
 
 (defun tcor-issue-match (mag)
-  (if (member mag '("CBG" "CSN"))
+  (if (member mag '("CBG" "CSN" "HM"))
       "\\b[0-9][0-9][0-9][0-9]\\b"
     "\\b[0-9][0-9][0-9]\\b"))
 
@@ -344,6 +344,7 @@
 	     collect
 	     (cons (gethash "identifier" (gethash "fields" hit))
 		   (gethash "title" (gethash "fields" hit))))))
+
 
 (defun tcor-unpack-jp2 (dir mag &optional prefix)
   (let ((subs nil))
@@ -587,7 +588,7 @@ instead of `browse-url-new-window-flag'."
             (list url)))))
 
 (defun tcor-segment-issue (issue mag)
-  (let* ((len (if (member mag '(CBG CSN)) 4 3))
+  (let* ((len (if (member mag '(CBG CSN HM)) 4 3))
 	 (num (substring issue (- (length issue) len))))
     (if (string-match "^[0-9]+$" num)
 	(cons (substring issue 0 (- (length issue) len))
@@ -689,7 +690,8 @@ instead of `browse-url-new-window-flag'."
   (tcor-index))
 
 (defun tcor-find-credits-pages (&optional hours mag start)
-  (let ((files nil))
+  (let ((files nil)
+	file)
     (dolist (mag (if mag
 		     (list (expand-file-name mag "~/src/kwakk/magscan/"))
 		   (directory-files "~/src/kwakk/magscan/" t "[A-Z]")))
@@ -824,6 +826,13 @@ instead of `browse-url-new-window-flag'."
   (dolist (mag (directory-files "~/src/kwakk/magscan/" t "[A-Z]"))
     (dolist (issue (directory-files mag t "[0-9]$"))
       (unless (file-exists-p (expand-file-name "page-001.jpg" issue))
+	(find-file issue)))))
+
+(defun tcor-find-directories-with-few-pages ()
+  (interactive)
+  (dolist (mag (directory-files "~/src/kwakk/magscan/" t "[A-Z]"))
+    (dolist (issue (directory-files mag t "[0-9]$"))
+      (when (< (length (directory-files issue t "page-[0-9]+.jpg")) 10)
 	(find-file issue)))))
 
 (defun tcor-view (file)
@@ -974,8 +983,10 @@ instead of `browse-url-new-window-flag'."
     titles))
 
 (defvar-keymap tcor-list-mode-map
+  "a" #'tcor-list-search-archive-org
   "s" #'tcor-list-search
-  "w" #'tcor-list-search-with-name)
+  "w" #'tcor-list-search-with-name
+  "z" #'tcor-list-search-archive-org-with-name)
 
 (define-derived-mode tcor-list-mode special-mode "TCOR")
 
@@ -1022,12 +1033,41 @@ instead of `browse-url-new-window-flag'."
   (interactive "sSearch with name: ")
   (tcor-list-search name))
 
+(defun tcor-list-search-archive-org-with-name (name)
+  (interactive "sSearch with name: ")
+  (tcor-list-search-archive-org name))
+
+(defun tcor-list-search-archive-org (&optional term)
+  (interactive)
+  (let* ((mag (vtable-current-object))
+	 (data
+	  (with-current-buffer (url-retrieve-synchronously
+				(concat "https://archive.org/advancedsearch.php?q=subject%3A%22"
+					(browse-url-encode-url (or term (cdr (assq 'name (cdr mag)))))
+					"%22&fl%5B%5D=description&fl%5B%5D=identifier&fl%5B%5D=subject&fl%5B%5D=title&fl%5B%5D=volume&fl%5B%5D=week&fl%5B%5D=year&sort%5B%5D=&sort%5B%5D=&sort%5B%5D=&rows=5000&page=1&output=json&save=yes"))
+	    (goto-char (point-min))
+	    (search-forward "\n\n")
+	    (prog1
+		(json-parse-buffer)
+	      (kill-buffer (current-buffer))))))
+    (tcor-list-results
+     (cl-loop for hit across (gethash "docs" (gethash "response" data))
+	      collect
+	      (list :link (concat "https://archive.org/details/" (gethash "identifier" hit))
+		    :name (gethash "title" hit)
+		    :spec ""
+		    :publisher ""))
+     mag)))
+
 (defun tcor-list-search (&optional name)
   (interactive)
   (let* ((mag (vtable-current-object))
 	 (name (or name (cdr (assq 'name (cdr mag)))))
 	 (url (format "https://annas-archive.org/search?q=%s"
-		      (replace-regexp-in-string "&" "%26" (browse-url-encode-url (concat "\"" name "\"")))))
+		      (replace-regexp-in-string
+		       "&" "%26"
+		       (browse-url-encode-url
+			(concat "\"" (replace-regexp-in-string "\\`The " "" name) "\"")))))
 	 (results nil)
 	 (first t)
 	 func dom urls)
@@ -1044,23 +1084,18 @@ instead of `browse-url-new-window-flag'."
 		 (when (search-forward " partial matches<" nil t)
 		   (delete-region (point) (point-max)))
 		 (setq dom (libxml-parse-html-region start (point-max))))
-	       (setq d dom)
+	       ;;(setq d dom)
 	       (kill-buffer (current-buffer))
-	       (cl-loop for comment in (dom-by-tag dom 'comment)
-			for text = (dom-text comment)
-			when (and text (string-match "<h3 " text))
-			do (dom-append-child dom
-					     (with-temp-buffer
-					       (insert text)
-					       (libxml-parse-html-region (point-min) (point-max)))))
 	       (setq results
 		     (append results
-			     (cl-loop for entry in (dom-by-tag dom 'h3)
+			     (cl-loop for entry in (dom-by-tag dom 'a)
+				      for link = (dom-attr entry 'href)
 				      for siblings = (dom-non-text-children (dom-parent dom entry))
+				      when (and link (string-match-p "\\`/md5/" link))
 				      collect (list :name (dom-text entry)
-						    :spec (dom-text (cadr (memq entry (reverse siblings))))
-						    :publisher (dom-text (cadr (memq entry siblings)))
-						    :link (dom-attr (dom-parent dom (dom-parent dom entry)) 'href)))))
+						    :spec (dom-text (car siblings))
+						    :publisher (dom-text (car (last siblings)))
+						    :link (concat "https://annas-archive.org" link)))))
 
 	       (if first
 		   (setq urls
@@ -1079,6 +1114,7 @@ instead of `browse-url-new-window-flag'."
     (funcall func (car urls))))
 
 (defun tcor-list-results (results mag)
+  (setq r results)
   (let ((objs (tcor-filter-results results mag)))
     (if (not objs)
 	(message "No missing issues found")
@@ -1130,9 +1166,10 @@ instead of `browse-url-new-window-flag'."
 	  (< (tcor-result-rank r1 missing)
 	     (tcor-result-rank r2 missing)))))
 
-(defun tcor-result-rank (result missing)
-  (seq-position (tcor-numberify-name (plist-get result :name))
-		(plist-get result :number)))
+(defun tcor-result-rank (result _missing)
+  (or (seq-position (tcor-numberify-name (plist-get result :name))
+		    (plist-get result :number))
+      most-positive-fixnum))
 
 (defun tcor-match-p (name missing)
   ;; Filter out common false matches.
@@ -1150,15 +1187,14 @@ instead of `browse-url-new-window-flag'."
 
 (defun tcor-missing-issues (elem &optional add-extra)
   ;;(setq add-extra nil)
-  (let* ((data (tcor-magazines))
-	 (parent (cdr (assq 'parent (cdr elem))))
+  (let* ((parent (cdr (assq 'parent (cdr elem))))
 	 (code (or parent (car elem)))
 	 (dfile (format "~/src/kwakk/magscan/%s/double-issues.txt" code))
 	 (doubles (and (file-exists-p dfile)
 		       (with-temp-buffer
 			 (insert-file-contents dfile)
 			 (split-string (buffer-string)))))
-	 (digits (if (member code '(CBG CSN))
+	 (digits (if (member code '(CBG CSN HM))
 		     4
 		   3))
 	 (issues (directory-files
@@ -1189,6 +1225,32 @@ instead of `browse-url-new-window-flag'."
 			unless (or (member em doubles)
 				   (member em issues))
 			collect (cons group i))))))
+
+(defun tcor-transform-png-to-jpg ()
+  (dolist (file (directory-files "." nil "[.]png\\'"))
+    (when (string-match "\\`\\([0-9]+\\)" file)
+      (let ((num (string-to-number (match-string 1 file))))
+	(call-process "convert" nil nil nil
+		      file (format "page-%03d.jpg" num))))))
+
+(defun tcor-copy-text-pages (mag)
+  (dolist (issue (directory-files (format "~/src/kwakk/cmagscan/%s/" mag)
+				  nil "[0-9]\\'"))
+    (let ((target (format "~/src/kwakk/magscan/%s/%s/" mag issue))
+	  (i 1))
+      (unless (file-exists-p target)
+	(make-directory target t)
+	(dolist (page (directory-files (format "~/src/kwakk/cmagscan/%s/%s/"
+					       mag issue)
+				       t "page-[0-9]+[.]txt\\'"))
+	  (when (or (string-match "page-001.txt" page)
+		    (> (file-attribute-size (file-attributes page))
+		       2000))
+	    (dolist (ext '("json" "jpg" "txt"))
+	      (copy-file (file-name-with-extension page ext)
+			 (expand-file-name (format "page-%03d.%s" i ext) target)
+			 nil t))
+	    (cl-incf i)))))))
 
 (provide 'tcor)
 
