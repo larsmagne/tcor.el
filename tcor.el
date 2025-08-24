@@ -40,7 +40,7 @@
 	     ("isOverlayRequired" . "true")
 	     ("scale" . "true")
 	     ;;("language" . ,(or language "eng"))
-	     ("OCREngine" . "2")
+	     ("OCREngine" . "1")
 	     ("file" . (("filedata" . ,(with-temp-buffer
 					 (set-buffer-multibyte nil)
 					 (insert-file-contents file)
@@ -62,7 +62,7 @@
 	   boundary)))
     (with-current-buffer (or (ignore-errors
 			       (url-retrieve-synchronously
-				"https://apipro1.ocr.space/parse/image" t nil
+				"https://apipro2.ocr.space/parse/image" t nil
 				600))
 			     (generate-new-buffer "*error*"))
       (goto-char (point-min))
@@ -88,14 +88,17 @@
       (goto-char (point-min))
       (setq json (ignore-errors
 		   (json-read)))
-      (when (eq (cdr (assq 'IsErroredOnProcessing json))
-		t)
-	(if (stringp (assq 'ErrorMessage json))
-	    (message "%s" (assq 'ErrorMessage json))
-	  (message "%s: %s"  (ignore-errors (cdr (assq 'ErrorMessage json)))
-		   (ignore-errors
-		     (cdr (assq 'ErrorMessage
-				(elt (cdr (assq 'ParsedResults json)) 0))))))
+      (when (or (eq (cdr (assq 'IsErroredOnProcessing json)) t)
+		(null json))
+	(cond
+	 ((null json)
+	  (message "Error: %s" (buffer-string)))
+	 ((stringp (assq 'ErrorMessage json))
+	  (message "%s" (assq 'ErrorMessage json)))
+	 (t (message "%s: %s"  (ignore-errors (cdr (assq 'ErrorMessage json)))
+		     (ignore-errors
+		       (cdr (assq 'ErrorMessage
+				  (elt (cdr (assq 'ParsedResults json)) 0)))))))
 	(setq got-error t)
 	(sleep-for 2))
       (when (and json
@@ -779,6 +782,27 @@ instead of `browse-url-new-window-flag'."
 	   do (sleep-for 1))
   (tcor-post-ocr))
 
+(defun tcor-fetch-fan-urls ()
+  (cl-loop with dom = (tcor-fetch-views "https://www.comicsfanzines.co.uk/")
+	   for elem in (dom-by-tag dom 'a)
+	   for link = (dom-attr elem 'href)
+	   when (and link (string-match-p "\\`/" link)
+		     (not (string-match-p "\\`/home" link)))
+	   do (tcor-view-urls (concat "https://www.comicsfanzines.co.uk" link))
+	   (sleep-for 3)))
+
+;;   DOGBREATH-3-5-COVER-BY---SKD---Darren-Stephens
+(defun tcor-fix-file-name (name)
+  (setq name (replace-regexp-in-string "--+" "-" name))
+  (setq name (replace-regexp-in-string "\\([0-9]+\\)-\\([0-9]+\\)" "\\1\\2" name))
+  (with-temp-buffer
+    (insert name)
+    (goto-char (point-min))
+    (when (re-search-forward "\\([0-9]+\\)" nil t)
+      (replace-match (format "%03d" (string-to-number (match-string 1)))))
+    (setq name (buffer-string)))
+  name)
+
 ;; https://www.comicsfanzines.co.uk/s-z/speakeasy-81-120
 (defun tcor-fetch-views (url)
   (let ((dom
@@ -797,11 +821,13 @@ instead of `browse-url-new-window-flag'."
 	   when (and url
 		     (string-match "drive.google.*/view" url)
 		     (not (zerop (length issue))))
-	   collect (list url (replace-regexp-in-string
-			      "[^a-zA-Z0-9]" "-"
-			      (replace-regexp-in-string
-			       "\\([0-9]+\\) +\\([()/0-9]+\\)\\'"
-			       "\\1\\2" issue)))))
+	   collect (list url
+			 (tcor-fix-file-name
+			  (replace-regexp-in-string
+			   "[^a-zA-Z0-9]" "-"
+			   (replace-regexp-in-string
+			    "\\([0-9]+\\) +\\([()/0-9]+\\)\\'"
+			    "\\1\\2" issue))))))
 
 (defun tcor-view-urls (url)
   (let ((list (tcor-parse-views (tcor-fetch-views url)))
