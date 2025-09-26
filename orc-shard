@@ -1,8 +1,11 @@
 #!/bin/bash
 
-for i in `seq 0 9`; do
+shard=2
+div=$(($shard + 1))
+
+for i in `seq 0 $shard`; do
     ~/src/emacs/trunk/src/emacs -l ~/src/magscan.el/magscan.el \
-				--eval "(tcor-sharded $i 10)" &
+				--eval "(tcor-sharded $i $div)" &
 done
 
 for job in `jobs -p`; do
