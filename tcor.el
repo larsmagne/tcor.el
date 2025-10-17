@@ -112,19 +112,22 @@
 	(with-temp-buffer
 	  (let ((text (cdr (assq 'ParsedText (aref ocr 0)))))
 	    (insert text)
-	    (goto-char (point-min))
-	    (while (re-search-forward "\r\n" nil t)
-	      (replace-match " " t t))
-	    (goto-char (point-min))
-	    (while (re-search-forward " +" nil t)
-	      (replace-match " " t t))
-	    (goto-char (point-min))
-	    (while (re-search-forward "- " nil t)
-	      (replace-match "" t t))
+	    (tcor-unfold-text)
 	    (write-region (point-min) (point-max)
 			  (replace-regexp-in-string
 			   "[.][^.]+\\'" ".txt" file))))))
     got-error))
+
+(defun tcor-unfold-text ()
+  (goto-char (point-min))
+  (while (re-search-forward "\r?\n" nil t)
+    (replace-match " " t t))
+  (goto-char (point-min))
+  (while (re-search-forward " +" nil t)
+    (replace-match " " t t))
+  (goto-char (point-min))
+  (while (re-search-forward "- " nil t)
+    (replace-match "" t t)))
 
 (defun tcor--identify (file)
   (with-temp-buffer
@@ -687,6 +690,8 @@ instead of `browse-url-new-window-flag'."
   (tcor-resize))
 
 (defun tcor-post-ocr ()
+  (tcor-generate-word-files)
+  (tcor-convert-surya)
   (magscan-covers-and-count)
   (tcor-count-pages)
   (tcor-gather-data)
@@ -1277,6 +1282,179 @@ instead of `browse-url-new-window-flag'."
 			 (expand-file-name (format "page-%03d.%s" i ext) target)
 			 nil t))
 	    (cl-incf i)))))))
+
+(defun tcor-surya-sort-columns (lines bbox)
+  (let ((width (- (elt bbox 2) (elt bbox 0))))
+    (sort lines
+	  (lambda (l1 l2)
+	    (let ((diff (- (elt (elt (plist-get l1 :polygon) 0) 0)
+			   (elt (elt (plist-get l2 :polygon) 0) 0))))
+	      ;; 10%
+	      (if (< (/ (abs (float diff)) width) 0.10)
+		  ;; Same column; sort by line.
+		  (< (elt (elt (plist-get l1 :polygon) 0) 1)
+		     (elt (elt (plist-get l2 :polygon) 0) 1))
+		;; Different columns.
+		(< diff 0)))))))
+  
+(defun tcor-parse-surya (file)
+  (let ((json (with-temp-buffer
+		(insert-file-contents file)
+		(json-parse-buffer :object-type 'plist)))
+	(dir (file-name-directory file)))
+    (cl-loop
+     for (page-symbol page) on json by #'cddr
+     with words
+     and text
+     for page-title = (substring (symbol-name page-symbol) 1)
+     do
+     (with-temp-buffer
+       (cl-loop for spage across page
+		do (cl-loop for line across
+			    (tcor-surya-sort-columns
+			     (plist-get spage :text_lines)
+			     (plist-get spage :image_bbox))
+			    do (insert (plist-get line :text) "\n")))
+       (goto-char (point-min))
+       (while (re-search-forward "</?[a-z0-9]+>" nil t)
+	 (replace-match ""))
+       (setq text (buffer-string))
+       (tcor-unfold-text)
+       (write-region (point-min) (point-max)
+		     (expand-file-name (concat page-title ".txt") dir)
+		     nil 'silent))
+     (cl-loop
+      for spage across page
+      do (cl-loop for line across (plist-get spage :text_lines)
+		  do (cl-loop
+		      with word = nil
+		      and start = nil
+		      and prev = nil
+		      for char across (plist-get line :chars)
+		      for text = (plist-get char :text)
+		      if (string-match "[-'0-9a-zA-Z]" text)
+		      do (if word
+			     (setq word (concat word text))
+			   (setq word text
+				 start (plist-get char :polygon)))
+		      else
+		      do (when word
+			   (setq word (replace-regexp-in-string "</?[a-z0-9]+>" "" word))
+			   (when (cl-plusp (length word))
+			     (push (vector
+				    word
+				    (cl-coerce
+				     (cl-loop
+				      for num in
+				      (list
+				       (elt (elt start 0) 0)
+				       (elt (elt start 0) 1)
+				       (- (elt (elt (plist-get prev :polygon)
+						    2)
+					       0)
+					  (elt (elt start 0) 0))
+				       (- (elt
+					   (elt (plist-get prev :polygon)
+						2)
+					   1)
+					  (elt (elt start 0) 1)))
+				      for int = (truncate num)
+				      collect (if (= (zerop (- num int)))
+						  int
+						num))
+				     'vector))
+				   words))
+			   (setq word nil))
+		      do (setq prev char))))
+     (with-temp-buffer
+       (insert (json-serialize (list :words (cl-coerce (nreverse words) 'vector)
+				     :text text)))
+       (write-region (point-min) (point-max)
+		     (expand-file-name (concat page-title "-words.json") dir)
+		     nil 'silent)))))
+
+(defun tcor-convert-surya ()
+  (dolist (surya (directory-files-recursively "~/src/kwakk/magscan/" "\\`results.json\\'"))
+    (let ((dir (file-name-directory surya)))
+      (when (cl-loop for file in (directory-files dir t "page.*-words.json\\'\\|page.*txt\\'")
+		     when (file-newer-than-file-p surya file)
+		     return t)
+	(message "%s" surya)
+	(tcor-parse-surya surya)))))
+
+(defun tcor-parse-space (file)
+  (let ((json (with-temp-buffer
+		(insert-file-contents file)
+		(let ((json (plist-get (json-parse-buffer :object-type 'plist)
+				       :ParsedResults)))
+		  (and (length> json 0)
+		       (elt json 0))))))
+    (with-temp-buffer
+      (insert
+       (json-serialize
+	(list
+	 'orientation (plist-get json :TextOrientation)
+	 'words
+	 (cl-coerce
+	  (tcor-adjust-continuation
+	   (cl-loop
+	    for line across
+	    (plist-get (plist-get json :TextOverlay) :Lines)
+	    append
+	    (cl-loop for word across (plist-get line :Words)
+		     collect (vector
+			      (plist-get word :WordText)
+			      (cl-coerce
+			       (cl-loop for num in
+					(list (plist-get word :Left)
+					      (plist-get word :Top)
+					      (plist-get word :Width)
+					      (plist-get word :Height))
+					for int = (truncate num)
+					collect (if (= (zerop (- num int)))
+						    int
+						  num))
+			       'vector)))))
+	  'vector)
+	 'text (plist-get json :ParsedText))))
+      (write-region
+       (point-min) (point-max)
+       (replace-regexp-in-string "[.]json\\'" "-words.json" file)
+       nil 'silent))))
+
+(defun tcor-adjust-continuation (words)
+  (let ((cont nil))
+    (nconc
+     (cl-loop for word in words
+	      do (when cont
+		   ;; Gather all ["Foo-" [pos]] ["bar" [pos]] into
+		   ;; ["Foobar" [pos] [pos]]
+		   (setq word (apply #'vector
+				     `(,(concat (elt cont 0) (elt word 0))
+				       ,@(seq-subseq cont 1)
+				       ,(elt word 1)))
+			 cont nil))
+	      if (string-match-p "-\\'" (elt word 0))
+	      do (setq cont
+		       (apply #'vector
+			      (replace-regexp-in-string "-\\'" ""
+							(elt word 0))
+			      (cl-coerce (seq-subseq word 1) 'list)))
+			       
+	      else
+	      collect word)
+     ;; Add trailing "foo-".
+     (if cont
+	 (list cont)
+       nil))))
+
+(defun tcor-generate-word-files ()
+  (dolist (file (directory-files-recursively
+		 "~/src/kwakk/magscan/" "page-[0-9]+[.]json\\'"))
+    (let ((words (replace-regexp-in-string "[.]json\\'" "-words.json" file)))
+      (when (or (not (file-exists-p words))
+		(file-newer-than-file-p file words))
+	(tcor-parse-space file)))))
 
 (provide 'tcor)
 
