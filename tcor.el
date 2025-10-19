@@ -1330,42 +1330,49 @@ instead of `browse-url-new-window-flag'."
 		      with word = nil
 		      and start = nil
 		      and prev = nil
+		      for line-length = (length (plist-get line :chars))
+		      for char-num from 1
 		      for char across (plist-get line :chars)
 		      for text = (plist-get char :text)
-		      if (string-match "[-'0-9a-zA-Z]" text)
-		      do (if word
-			     (setq word (concat word text))
-			   (setq word text
-				 start (plist-get char :polygon)))
-		      else
-		      do (when word
-			   (setq word (replace-regexp-in-string "</?[a-z0-9]+>" "" word))
-			   (when (cl-plusp (length word))
-			     (push (vector
-				    word
-				    (cl-coerce
-				     (cl-loop
-				      for num in
-				      (list
-				       (elt (elt start 0) 0)
-				       (elt (elt start 0) 1)
-				       (- (elt (elt (plist-get prev :polygon)
-						    2)
-					       0)
-					  (elt (elt start 0) 0))
-				       (- (elt
-					   (elt (plist-get prev :polygon)
-						2)
-					   1)
-					  (elt (elt start 0) 1)))
-				      for int = (truncate num)
-				      collect (if (= (zerop (- num int)))
-						  int
-						num))
-				     'vector))
-				   words))
-			   (setq word nil))
-		      do (setq prev char))))
+		      for is-word = (string-match "[-'0-9a-zA-Z]" text)
+		      do
+		      (when is-word
+			(if word
+			    (setq word (concat word text))
+			  (setq word text
+				start (plist-get char :polygon))))
+		      (when (or (not is-word)
+				(= char-num line-length))
+			(when (= char-num line-length)
+			  (setq prev char))
+			(when word
+			  (setq word (replace-regexp-in-string "</?[a-z0-9]+>" "" word))
+			  (when (cl-plusp (length word))
+			    (push (vector
+				   word
+				   (cl-coerce
+				    (cl-loop
+				     for num in
+				     (list
+				      (elt (elt start 0) 0)
+				      (elt (elt start 0) 1)
+				      (- (elt (elt (plist-get prev :polygon)
+						   2)
+					      0)
+					 (elt (elt start 0) 0))
+				      (- (elt
+					  (elt (plist-get prev :polygon)
+					       2)
+					  1)
+					 (elt (elt start 0) 1)))
+				     for int = (truncate num)
+				     collect (if (= (zerop (- num int)))
+						 int
+					       num))
+				    'vector))
+				  words))
+			  (setq word nil)))
+		      (setq prev char))))
      (with-temp-buffer
        (insert (json-serialize (list :words (cl-coerce (nreverse words) 'vector)
 				     :text text)))
@@ -1375,10 +1382,12 @@ instead of `browse-url-new-window-flag'."
 
 (defun tcor-convert-surya ()
   (dolist (surya (directory-files-recursively "~/src/kwakk/magscan/" "\\`results.json\\'"))
-    (let ((dir (file-name-directory surya)))
-      (when (cl-loop for file in (directory-files dir t "page.*-words.json\\'\\|page.*txt\\'")
-		     when (file-newer-than-file-p surya file)
-		     return t)
+    (let* ((dir (file-name-directory surya))
+	   (files (directory-files dir t "page-[0-9]+-words.json\\'\\|page-[0-9]+txt\\'")))
+      (when (or (null files)
+		(cl-loop for file in files
+			 when (file-newer-than-file-p surya file)
+			 return t))
 	(message "%s" surya)
 	(tcor-parse-surya surya)))))
 
