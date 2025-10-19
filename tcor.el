@@ -1335,6 +1335,8 @@ instead of `browse-url-new-window-flag'."
 		      for char across (plist-get line :chars)
 		      for text = (plist-get char :text)
 		      for is-word = (string-match "[-'0-9a-zA-Z]" text)
+		      ;; Skip chars like "<i>".
+		      when (length= text 1)
 		      do
 		      (when is-word
 			(if word
@@ -1374,7 +1376,7 @@ instead of `browse-url-new-window-flag'."
 			  (setq word nil)))
 		      (setq prev char))))
      (with-temp-buffer
-       (insert (json-serialize (list :words (cl-coerce (nreverse words) 'vector)
+       (insert (json-serialize (list :words (cl-coerce (tcor-adjust-continuation (nreverse words)) 'vector)
 				     :text text)))
        (write-region (point-min) (point-max)
 		     (expand-file-name (concat page-title "-words.json") dir)
