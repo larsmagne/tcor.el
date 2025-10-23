@@ -1296,11 +1296,27 @@ instead of `browse-url-new-window-flag'."
 		     (elt (elt (plist-get l2 :polygon) 0) 1))
 		;; Different columns.
 		(< diff 0)))))))
-  
-(defun tcor-parse-surya (file)
-  (let ((json (with-temp-buffer
-		(insert-file-contents file)
-		(json-parse-buffer :object-type 'plist)))
+
+(defun tcor-parse-big-surya (file)
+  (with-temp-buffer
+    (insert-file-contents file)
+    (forward-char 1)
+    (while (not (looking-at "}"))
+      (let ((page (json-parse-buffer :object-type 'plist))
+	    data)
+	(forward-char 2)
+	(setq data (json-parse-buffer :object-type 'plist))
+	(when (looking-at ", ")
+	  (forward-char 2))
+	(message "Page %s" page)
+	(tcor-parse-surya file (list (intern (concat ":" page))
+				     data))))))
+
+(defun tcor-parse-surya (file &optional json)
+  (let ((json (or json
+		  (with-temp-buffer
+		    (insert-file-contents file)
+		    (json-parse-buffer :object-type 'plist))))
 	(dir (file-name-directory file)))
     (cl-loop
      for (page-symbol page) on json by #'cddr
@@ -1334,7 +1350,7 @@ instead of `browse-url-new-window-flag'."
 		      for char-num from 1
 		      for char across (plist-get line :chars)
 		      for text = (plist-get char :text)
-		      for is-word = (string-match "[-'0-9a-zA-Z]" text)
+		      for is-word = (string-match "[-'[:word:]]" text)
 		      ;; Skip chars like "<i>".
 		      when (length= text 1)
 		      do
@@ -1391,7 +1407,9 @@ instead of `browse-url-new-window-flag'."
 			 when (file-newer-than-file-p surya file)
 			 return t))
 	(message "%s" surya)
-	(tcor-parse-surya surya)))))
+	(if (< (file-attribute-size (file-attributes surya)) 300000000)
+	    (tcor-parse-surya surya)
+	  (tcor-parse-big-surya surya))))))
 
 (defun tcor-parse-space (file)
   (let ((json (with-temp-buffer
