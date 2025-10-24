@@ -1350,9 +1350,9 @@ instead of `browse-url-new-window-flag'."
 		      for char-num from 1
 		      for char across (plist-get line :chars)
 		      for text = (plist-get char :text)
-		      for is-word = (string-match "[-'[:word:]]" text)
-		      ;; Skip chars like "<i>".
-		      when (length= text 1)
+		      for is-word = (and (string-match "[-'[:word:]]" text)
+					 ;; Skip chars like "<i>".
+					 (length= text 1))
 		      do
 		      (when is-word
 			(if word
